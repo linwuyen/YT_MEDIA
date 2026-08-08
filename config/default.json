@@ -1,0 +1,30 @@
+{
+  "drive_root_folder_id": "1vg-sHZfam52sAZWqMu6uIHhUUqSZEC8x",
+  "youtube_channel_id": "UCzqapvxqSNMeNEM2ng91sow",
+  "youtube_channel_name": "象兒應援團",
+  "timezone": "Asia/Taipei",
+  "publish_time": "18:30",
+  "minimum_lead_minutes": 90,
+  "max_uploads_per_run": 8,
+  "priority_folder_name": "01_優先上傳",
+  "done_folder_name": "04_已上傳",
+  "excluded_folder_names": ["02_待剪輯", "03_重複待刪除", "04_已上傳"],
+  "category_id": "17",
+  "made_for_kids": false,
+  "notify_subscribers": true,
+  "default_language": "zh-TW",
+  "remux_with_ffmpeg": true,
+  "stop_on_first_error": true,
+  "known_people": ["李珠垠", "朴星垠", "卡洛琳", "安娜", "李雅英"],
+  "named_title_templates": [
+    "{person}應援魅力全開🔥｜球場啦啦隊直拍 4K",
+    "{person}一登場全場目光被吸走🔥｜球場應援直拍 4K",
+    "{person}這段應援太有感染力了🔥｜啦啦隊直拍 4K"
+  ],
+  "generic_title_templates": [
+    "球場應援魅力全開🔥｜啦啦隊直拍 4K",
+    "全場氣氛瞬間拉滿🔥｜球場啦啦隊直拍 4K",
+    "這段應援太有感染力了🔥｜球場直拍 4K"
+  ],
+  "hashtags": ["啦啦隊", "球場應援", "應援女孩", "直拍", "4K", "Shorts"]
+}
