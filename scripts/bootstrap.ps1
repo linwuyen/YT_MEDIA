@@ -4,32 +4,65 @@ Set-Location $Repo
 $Runtime = Join-Path $env:LOCALAPPDATA "YT_MEDIA"
 New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
 
-Write-Host "=== YT_MEDIA 一次安裝 ===" -ForegroundColor Cyan
+Write-Host "=== YT_MEDIA bootstrap ===" -ForegroundColor Cyan
 
-if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Host "找不到 Python，嘗試使用 winget 安裝 Python 3.12..."
-        winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
+function Find-BootstrapPython {
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) { return @{ Command = $py.Source; Args = @("-3") } }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python) { return @{ Command = $python.Source; Args = @() } }
+
+    $localPythonRoot = Join-Path $env:LOCALAPPDATA "Programs\Python"
+    if (Test-Path $localPythonRoot) {
+        $candidate = Get-ChildItem $localPythonRoot -Recurse -File -Filter "python.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch "\\Scripts\\" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($candidate) { return @{ Command = $candidate.FullName; Args = @() } }
+    }
+
+    return $null
+}
+
+$BootstrapPython = Find-BootstrapPython
+if (-not $BootstrapPython) {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "Python was not found. Installing Python 3.12 with winget..."
+        & $winget.Source install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
+        $BootstrapPython = Find-BootstrapPython
     }
 }
-if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-    throw "仍找不到 Python Launcher (py)。請安裝 Python 3.11+ 後重跑。"
+if (-not $BootstrapPython) {
+    throw "Python 3.11+ was not found. Install Python and run INSTALL.cmd again."
 }
 
-if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Write-Host "找不到 FFmpeg，嘗試使用 winget 安裝..."
-    try {
-        winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
-    } catch {
-        Write-Warning "FFmpeg 自動安裝失敗；Agent 仍可直接使用原始 MP4。"
+$ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
+if (-not $ffmpeg) {
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host "FFmpeg was not found. Trying winget installation..."
+        try {
+            & $winget.Source install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
+        } catch {
+            Write-Warning "FFmpeg installation failed. The agent can still upload the original MP4 file."
+        }
     }
 }
 
-if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
-    py -3 -m venv .venv
+$VenvPython = ".\.venv\Scripts\python.exe"
+if (-not (Test-Path $VenvPython)) {
+    $cmd = $BootstrapPython.Command
+    $args = @($BootstrapPython.Args) + @("-m", "venv", ".venv")
+    & $cmd @args
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create Python virtual environment." }
 }
-& ".\.venv\Scripts\python.exe" -m pip install --upgrade pip
-& ".\.venv\Scripts\python.exe" -m pip install -e .
+
+& $VenvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed." }
+& $VenvPython -m pip install -e .
+if ($LASTEXITCODE -ne 0) { throw "YT_MEDIA package installation failed." }
 
 $ClientTarget = Join-Path $Runtime "client_secret.json"
 if (-not (Test-Path $ClientTarget)) {
@@ -38,31 +71,39 @@ if (-not (Test-Path $ClientTarget)) {
         (Join-Path $env:USERPROFILE "Downloads"),
         "D:\Downloads"
     ) | Select-Object -Unique
+
     foreach ($Dir in $DownloadDirs) {
         if (Test-Path $Dir) {
             $Candidates += Get-ChildItem $Dir -Recurse -File -Filter "client_secret*.json" -ErrorAction SilentlyContinue
         }
     }
+
     $Found = $Candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($Found) {
         Copy-Item -LiteralPath $Found.FullName -Destination $ClientTarget -Force
-        Write-Host "已自動找到 OAuth client_secret：$($Found.FullName)" -ForegroundColor Green
+        Write-Host "OAuth client_secret copied from: $($Found.FullName)" -ForegroundColor Green
     }
 }
+
 if (-not (Test-Path $ClientTarget)) {
     Write-Host ""
-    Write-Host "缺少 Google Desktop OAuth JSON。" -ForegroundColor Yellow
-    Write-Host "請把它改名為 client_secret.json 放到："
+    Write-Host "Google Desktop OAuth JSON was not found." -ForegroundColor Yellow
+    Write-Host "Rename it to client_secret.json and place it here:"
     Write-Host $ClientTarget
-    throw "client_secret.json 尚未準備完成。"
+    throw "client_secret.json is missing."
 }
 
 Write-Host ""
-Write-Host "開始一次性 Google 授權..." -ForegroundColor Cyan
-& ".\.venv\Scripts\python.exe" -m yt_media.agent authorize
-if ($LASTEXITCODE -ne 0) { throw "Google 授權或 YouTube 頻道驗證失敗。" }
+Write-Host "Starting one-time Google authorization..." -ForegroundColor Cyan
+& $VenvPython -m yt_media.agent authorize
+if ($LASTEXITCODE -ne 0) {
+    throw "Google authorization or YouTube channel verification failed."
+}
 
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\install_schedule.ps1"
+if ($LASTEXITCODE -ne 0) { throw "Task Scheduler installation failed." }
+
 Write-Host ""
-Write-Host "安裝完成。從現在開始只要把影片丟進 Google Drive。" -ForegroundColor Green
-Write-Host "Agent 會每小時檢查並自動排程。"
+Write-Host "Installation complete." -ForegroundColor Green
+Write-Host "From now on, put videos in the configured Google Drive folder."
+Write-Host "The agent checks every hour and schedules uploads automatically."
