@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,7 +22,21 @@ YOUTUBE_SCOPES = [
 
 def _credential_paths() -> tuple[Path, Path, Path]:
     runtime = runtime_dir()
-    return runtime / "client_secret.json", runtime / "drive_token.json", runtime / "youtube_token.json"
+    client = Path(os.environ.get("YT_MEDIA_CLIENT_SECRET_PATH", str(runtime / "client_secret.json")))
+    drive = Path(os.environ.get("YT_MEDIA_DRIVE_TOKEN_PATH", str(runtime / "drive_token.json")))
+    youtube = Path(os.environ.get("YT_MEDIA_YOUTUBE_TOKEN_PATH", str(runtime / "youtube_token.json")))
+    return client, drive, youtube
+
+
+def _write_token_if_possible(token_path: Path, creds: Credentials) -> None:
+    try:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+    except OSError:
+        # Cloud Run mounts Secret Manager files read-only. A refreshed access
+        # token only needs to live for this process; the refresh token stored in
+        # Secret Manager remains sufficient for the next execution.
+        pass
 
 
 def _credentials(token_path: Path, scopes: list[str], interactive: bool) -> Credentials:
@@ -32,7 +47,7 @@ def _credentials(token_path: Path, scopes: list[str], interactive: bool) -> Cred
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            token_path.write_text(creds.to_json(), encoding="utf-8")
+            _write_token_if_possible(token_path, creds)
         except Exception:
             creds = None
     if creds and creds.valid:
@@ -42,11 +57,9 @@ def _credentials(token_path: Path, scopes: list[str], interactive: bool) -> Cred
     if not client_secret.exists():
         raise FileNotFoundError(f"找不到 {client_secret}")
 
-    # Do not enable Google's incremental authorization here. Drive and YouTube
-    # intentionally use separate token files. If include_granted_scopes=true is
-    # used, Google can return the union of scopes previously granted to this
-    # OAuth client. oauthlib then treats that scope expansion as a mismatch and
-    # raises: "Scope has changed from ...".
+    # Drive and YouTube intentionally use separate tokens. Do not enable
+    # incremental authorization, because Google can otherwise return a union of
+    # previously granted scopes and oauthlib rejects that as a scope mismatch.
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), scopes=scopes)
     return flow.run_local_server(
         host="localhost",
@@ -77,7 +90,10 @@ def build_youtube(config: dict[str, Any], interactive: bool = False):
     channel = next((item for item in channels if item["id"] == expected), None)
     if not channel:
         if interactive:
-            youtube_token.unlink(missing_ok=True)
+            try:
+                youtube_token.unlink(missing_ok=True)
+            except OSError:
+                pass
         visible = ", ".join(f"{x['id']} ({x['title']})" for x in channels) or "沒有取得任何頻道"
         raise RuntimeError(f"OAuth 頻道不符。已授權：{visible}")
     return youtube, creds, channel
@@ -87,17 +103,18 @@ def authorize_drive() -> dict[str, Any]:
     _, drive_token, _ = _credential_paths()
     drive, creds = build_drive(interactive=True)
     about = drive.about().get(fields="user(displayName,emailAddress)").execute()
-    drive_token.parent.mkdir(parents=True, exist_ok=True)
-    drive_token.write_text(creds.to_json(), encoding="utf-8")
+    _write_token_if_possible(drive_token, creds)
     return about.get("user", {})
 
 
 def authorize_youtube(config: dict[str, Any]) -> dict[str, Any]:
     _, _, youtube_token = _credential_paths()
-    youtube_token.unlink(missing_ok=True)
+    try:
+        youtube_token.unlink(missing_ok=True)
+    except OSError:
+        pass
     _, creds, channel = build_youtube(config, interactive=True)
-    youtube_token.parent.mkdir(parents=True, exist_ok=True)
-    youtube_token.write_text(creds.to_json(), encoding="utf-8")
+    _write_token_if_possible(youtube_token, creds)
     return channel
 
 
