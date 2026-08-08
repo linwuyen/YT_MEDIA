@@ -25,6 +25,44 @@ function Find-BootstrapPython {
     return $null
 }
 
+function Test-OAuthJson([string]$Path) {
+    try {
+        $obj = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+        return ($null -ne $obj.installed -or $null -ne $obj.web)
+    } catch {
+        return $false
+    }
+}
+
+function Select-OAuthJson([string]$Target) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "Select Google OAuth client JSON"
+    $dialog.Filter = "Google OAuth JSON (*.json)|*.json|All files (*.*)|*.*"
+    $dialog.Multiselect = $false
+    $downloads = Join-Path $env:USERPROFILE "Downloads"
+    if (Test-Path $downloads) { $dialog.InitialDirectory = $downloads }
+
+    $result = $dialog.ShowDialog()
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        return $false
+    }
+
+    if (-not (Test-OAuthJson $dialog.FileName)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "The selected JSON is not a Google OAuth client configuration.",
+            "YT_MEDIA",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+        return $false
+    }
+
+    Copy-Item -LiteralPath $dialog.FileName -Destination $Target -Force
+    Write-Host "OAuth client_secret copied from: $($dialog.FileName)" -ForegroundColor Green
+    return $true
+}
+
 $BootstrapPython = Find-BootstrapPython
 if (-not $BootstrapPython) {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
@@ -67,18 +105,25 @@ if ($LASTEXITCODE -ne 0) { throw "YT_MEDIA package installation failed." }
 $ClientTarget = Join-Path $Runtime "client_secret.json"
 if (-not (Test-Path $ClientTarget)) {
     $Candidates = @()
-    $DownloadDirs = @(
+    $SearchDirs = @(
         (Join-Path $env:USERPROFILE "Downloads"),
+        (Join-Path $env:USERPROFILE "Desktop"),
+        (Join-Path $env:USERPROFILE "Documents"),
+        $Repo,
         "D:\Downloads"
     ) | Select-Object -Unique
 
-    foreach ($Dir in $DownloadDirs) {
+    foreach ($Dir in $SearchDirs) {
         if (Test-Path $Dir) {
             $Candidates += Get-ChildItem $Dir -Recurse -File -Filter "client_secret*.json" -ErrorAction SilentlyContinue
         }
     }
 
-    $Found = $Candidates | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $Found = $Candidates |
+        Where-Object { Test-OAuthJson $_.FullName } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+
     if ($Found) {
         Copy-Item -LiteralPath $Found.FullName -Destination $ClientTarget -Force
         Write-Host "OAuth client_secret copied from: $($Found.FullName)" -ForegroundColor Green
@@ -87,10 +132,17 @@ if (-not (Test-Path $ClientTarget)) {
 
 if (-not (Test-Path $ClientTarget)) {
     Write-Host ""
-    Write-Host "Google Desktop OAuth JSON was not found." -ForegroundColor Yellow
-    Write-Host "Rename it to client_secret.json and place it here:"
-    Write-Host $ClientTarget
-    throw "client_secret.json is missing."
+    Write-Host "OAuth JSON was not found automatically." -ForegroundColor Yellow
+    Write-Host "A file picker will open. Select the Desktop OAuth JSON downloaded from Google Cloud."
+    $picked = Select-OAuthJson $ClientTarget
+    if (-not $picked) {
+        throw "OAuth JSON was not selected. Run INSTALL.cmd again when the file is available."
+    }
+}
+
+if (-not (Test-OAuthJson $ClientTarget)) {
+    Remove-Item $ClientTarget -Force -ErrorAction SilentlyContinue
+    throw "client_secret.json is invalid. Run INSTALL.cmd again and select the correct Google OAuth JSON."
 }
 
 Write-Host ""
