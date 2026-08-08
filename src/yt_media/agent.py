@@ -212,6 +212,11 @@ def main() -> int:
     config = load_config(REPO_ROOT)
 
     if args.command == "authorize":
+        paths = _paths()
+        # A fresh interactive authorization must not reuse partial/stale tokens
+        # left behind by an interrupted setup attempt.
+        paths["drive_token"].unlink(missing_ok=True)
+        paths["youtube_token"].unlink(missing_ok=True)
         print("[1/2] Google Drive 授權")
         print(json.dumps(authorize_drive(), ensure_ascii=False, indent=2))
         print("[2/2] YouTube 授權與目標頻道驗證")
