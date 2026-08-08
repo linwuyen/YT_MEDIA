@@ -41,6 +41,12 @@ def _credentials(token_path: Path, scopes: list[str], interactive: bool) -> Cred
         raise RuntimeError(f"尚未授權：{token_path.name}")
     if not client_secret.exists():
         raise FileNotFoundError(f"找不到 {client_secret}")
+
+    # Do not enable Google's incremental authorization here. Drive and YouTube
+    # intentionally use separate token files. If include_granted_scopes=true is
+    # used, Google can return the union of scopes previously granted to this
+    # OAuth client. oauthlib then treats that scope expansion as a mismatch and
+    # raises: "Scope has changed from ...".
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), scopes=scopes)
     return flow.run_local_server(
         host="localhost",
@@ -48,7 +54,6 @@ def _credentials(token_path: Path, scopes: list[str], interactive: bool) -> Cred
         open_browser=True,
         access_type="offline",
         prompt="consent select_account",
-        include_granted_scopes="true",
         success_message="The authentication flow has completed. You may close this window.",
     )
 
