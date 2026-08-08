@@ -23,20 +23,11 @@ concurrency:
 
 jobs:
   deploy:
+    if: ${{ vars.GCP_PROJECT_ID != '' && vars.GCP_REGION != '' && vars.GCP_STATE_BUCKET != '' && vars.GCP_RUNTIME_SA != '' && vars.GCP_DEPLOY_SA != '' && vars.GCP_WIF_PROVIDER != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Validate cloud variables
-        shell: bash
-        run: |
-          test -n "${{ vars.GCP_PROJECT_ID }}"
-          test -n "${{ vars.GCP_REGION }}"
-          test -n "${{ vars.GCP_STATE_BUCKET }}"
-          test -n "${{ vars.GCP_RUNTIME_SA }}"
-          test -n "${{ vars.GCP_DEPLOY_SA }}"
-          test -n "${{ vars.GCP_WIF_PROVIDER }}"
 
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v3
