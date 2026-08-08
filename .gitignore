@@ -10,3 +10,4 @@ work/
 data/
 client_secret*.json
 *token*.json
+gha-creds-*.json
