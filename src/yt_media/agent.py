@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .core import load_config, make_metadata, read_state, runtime_dir, schedule_slots, write_state
+from .core import execution_lock, load_config, make_metadata, read_state, runtime_dir, schedule_slots, write_state
 from .google_api import (
     authorize_drive,
     authorize_youtube,
@@ -33,9 +34,9 @@ def _paths() -> dict[str, Path]:
         "state": root / "state.json",
         "log": root / "logs" / "agent.jsonl",
         "work": root / "work",
-        "client": root / "client_secret.json",
-        "drive_token": root / "drive_token.json",
-        "youtube_token": root / "youtube_token.json",
+        "client": Path(os.environ.get("YT_MEDIA_CLIENT_SECRET_PATH", str(root / "client_secret.json"))),
+        "drive_token": Path(os.environ.get("YT_MEDIA_DRIVE_TOKEN_PATH", str(root / "drive_token.json"))),
+        "youtube_token": Path(os.environ.get("YT_MEDIA_YOUTUBE_TOKEN_PATH", str(root / "youtube_token.json"))),
     }
 
 
@@ -45,13 +46,14 @@ def log_event(event: dict[str, Any]) -> None:
     record = {"time": datetime.now(timezone.utc).isoformat(), **event}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(json.dumps(record, ensure_ascii=False, indent=2))
+    print(json.dumps(record, ensure_ascii=False, indent=2), flush=True)
 
 
 def doctor(config: dict[str, Any]) -> int:
     paths = _paths()
     result: dict[str, Any] = {
         "runtime": str(paths["root"]),
+        "state_backend": os.environ.get("YT_MEDIA_STATE_GCS_URI") or str(paths["state"]),
         "client_secret": paths["client"].exists(),
         "drive_token": paths["drive_token"].exists(),
         "youtube_token": paths["youtube_token"].exists(),
@@ -156,7 +158,7 @@ def run_once(config: dict[str, Any]) -> int:
         cleaned = work_dir / f"{Path(item.name).stem}_clean.mp4"
         try:
             log_event({"event": "download_start", "file": item.name, "drive_file_id": item.file_id})
-            download_file(drive, item.file_id, original, lambda p: print(f"下載 {item.name}: {p * 100:.1f}%"))
+            download_file(drive, item.file_id, original, lambda p: print(f"下載 {item.name}: {p * 100:.1f}%", flush=True))
             upload_path = remux_primary_streams(original, cleaned, bool(config.get("remux_with_ffmpeg", True)))
             metadata = make_metadata(item, probe(upload_path), config)
             log_event({
@@ -171,7 +173,7 @@ def run_once(config: dict[str, Any]) -> int:
                 metadata,
                 slot,
                 config,
-                lambda p: print(f"上傳 {item.name}: {p * 100:.1f}%"),
+                lambda p: print(f"上傳 {item.name}: {p * 100:.1f}%", flush=True),
             )
             video_id = response["id"]
             entry.update({
@@ -183,6 +185,8 @@ def run_once(config: dict[str, Any]) -> int:
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "moved": False,
             })
+            # Persist the YouTube ID before any Drive move. This is the key
+            # idempotency boundary: a retry will reconcile instead of reupload.
             write_state(paths["state"], state)
             log_event({
                 "event": "upload_success",
@@ -213,8 +217,6 @@ def main() -> int:
 
     if args.command == "authorize":
         paths = _paths()
-        # A fresh interactive authorization must not reuse partial/stale tokens
-        # left behind by an interrupted setup attempt.
         paths["drive_token"].unlink(missing_ok=True)
         paths["youtube_token"].unlink(missing_ok=True)
         print("[1/2] Google Drive 授權")
@@ -227,7 +229,11 @@ def main() -> int:
     if args.command == "queue":
         return queue_report(config)
     if args.command == "run":
-        return run_once(config)
+        with execution_lock() as acquired:
+            if not acquired:
+                print("Another cloud execution is active; exiting without doing work.")
+                return 0
+            return run_once(config)
     return 2
 
 

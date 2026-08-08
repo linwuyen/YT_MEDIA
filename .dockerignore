@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+*.pyo
+*.log
+.runtime
+secrets
+work
+data
+client_secret*.json
+*token*.json
+gha-creds-*.json

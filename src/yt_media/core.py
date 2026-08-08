@@ -4,10 +4,11 @@ import hashlib
 import json
 import os
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from zoneinfo import ZoneInfo
 
 
@@ -35,6 +36,9 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
 
 
 def runtime_dir() -> Path:
+    explicit = os.environ.get("YT_MEDIA_RUNTIME_DIR")
+    if explicit:
+        return Path(explicit)
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".yt_media")
     return Path(base) / "YT_MEDIA"
 
@@ -48,17 +52,110 @@ def load_config(repo_root: Path) -> dict[str, Any]:
     return config
 
 
+def _state_gcs_uri() -> str:
+    return os.environ.get("YT_MEDIA_STATE_GCS_URI", "").strip()
+
+
+def _parse_gs_uri(uri: str) -> tuple[str, str]:
+    if not uri.startswith("gs://"):
+        raise ValueError("YT_MEDIA_STATE_GCS_URI must start with gs://")
+    rest = uri[5:]
+    bucket, sep, name = rest.partition("/")
+    if not bucket or not sep or not name:
+        raise ValueError("YT_MEDIA_STATE_GCS_URI must be gs://bucket/object")
+    return bucket, name
+
+
 def read_state(path: Path) -> dict[str, Any]:
+    uri = _state_gcs_uri()
+    if uri:
+        from google.api_core.exceptions import NotFound
+        from google.cloud import storage
+
+        bucket_name, object_name = _parse_gs_uri(uri)
+        blob = storage.Client().bucket(bucket_name).blob(object_name)
+        try:
+            return json.loads(blob.download_as_text(encoding="utf-8"))
+        except NotFound:
+            return {"files": {}}
+
     if not path.exists():
         return {"files": {}}
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
+    payload = json.dumps(state, ensure_ascii=False, indent=2)
+    uri = _state_gcs_uri()
+    if uri:
+        from google.cloud import storage
+
+        bucket_name, object_name = _parse_gs_uri(uri)
+        blob = storage.Client().bucket(bucket_name).blob(object_name)
+        blob.upload_from_string(payload, content_type="application/json; charset=utf-8")
+        return
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.write_text(payload, encoding="utf-8")
     temp.replace(path)
+
+
+@contextmanager
+def execution_lock(max_age_hours: int = 6) -> Iterator[bool]:
+    """Prevent overlapping cloud executions.
+
+    Local Windows runs already have a file lock in run_agent.ps1. In Cloud Run,
+    use a small GCS lock object next to state.json. A stale lock is recoverable
+    after max_age_hours so a killed container cannot block publishing forever.
+    """
+    uri = _state_gcs_uri()
+    if not uri:
+        yield True
+        return
+
+    from google.api_core.exceptions import NotFound, PreconditionFailed
+    from google.cloud import storage
+
+    bucket_name, object_name = _parse_gs_uri(uri)
+    bucket = storage.Client().bucket(bucket_name)
+    lock_blob = bucket.blob(object_name + ".lock")
+    acquired = False
+    generation: int | None = None
+
+    def try_acquire() -> bool:
+        nonlocal acquired, generation
+        try:
+            lock_blob.upload_from_string(
+                datetime.now(timezone.utc).isoformat(),
+                content_type="text/plain; charset=utf-8",
+                if_generation_match=0,
+            )
+            lock_blob.reload()
+            generation = int(lock_blob.generation) if lock_blob.generation else None
+            acquired = True
+            return True
+        except PreconditionFailed:
+            return False
+
+    if not try_acquire():
+        try:
+            lock_blob.reload()
+            if lock_blob.updated and datetime.now(timezone.utc) - lock_blob.updated > timedelta(hours=max_age_hours):
+                stale_generation = int(lock_blob.generation) if lock_blob.generation else None
+                lock_blob.delete(if_generation_match=stale_generation)
+                try_acquire()
+        except (NotFound, PreconditionFailed):
+            try_acquire()
+
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                lock_blob.delete(if_generation_match=generation)
+            except (NotFound, PreconditionFailed):
+                pass
 
 
 def parse_recording_date(filename: str) -> str:
