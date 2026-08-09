@@ -32,7 +32,7 @@ if errorlevel 1 if not exist "%GH_PROGRAMFILES%" (
   )
 )
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\deploy_cloud.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\deploy_cloud_v2.ps1"
 set "EXITCODE=%ERRORLEVEL%"
 pause
 exit /b %EXITCODE%
