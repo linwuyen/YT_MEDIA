@@ -57,6 +57,7 @@ def test_arm_statistics_prefers_mature_learning_window_and_ignores_fallback():
         "files": {
             "a": {
                 "metadata_arm": "direct",
+                "experiment_phase": "metadata",
                 "analytics": {
                     "24h": {"score": 30, "source": "youtube_analytics"},
                     "72h": {"score": 70, "source": "youtube_analytics"},
@@ -64,10 +65,12 @@ def test_arm_statistics_prefers_mature_learning_window_and_ignores_fallback():
             },
             "b": {
                 "metadata_arm": "direct",
+                "experiment_phase": "metadata",
                 "analytics": {"7d": {"score": 90, "source": "youtube_analytics"}},
             },
             "fallback": {
                 "metadata_arm": "direct",
+                "experiment_phase": "metadata",
                 "analytics": {"7d": {"score": 100, "source": "data_api_fallback"}},
             },
         }
@@ -96,11 +99,13 @@ def test_contextual_stats_weight_matching_context_more():
         "files": {
             "similar": {
                 "metadata_arm": "a",
+                "experiment_phase": "metadata",
                 "context": dict(target),
                 "analytics": {"72h": {"score": 90, "source": "youtube_analytics"}},
             },
             "different": {
                 "metadata_arm": "a",
+                "experiment_phase": "metadata",
                 "context": {
                     "person": "generic",
                     "duration_bucket": "91-180",
@@ -123,6 +128,36 @@ def test_contextual_stats_weight_matching_context_more():
     assert stats["b"]["count"] == 0
 
 
+def test_contextual_stats_ignore_uncontrolled_legacy_samples():
+    target = {
+        "person": "generic",
+        "duration_bucket": "16-30",
+        "quality": "4K",
+        "fps_bucket": "60",
+        "orientation": "vertical",
+        "opening": "active",
+        "weekday_group": "weekday",
+    }
+    state = {
+        "files": {
+            "controlled": {
+                "metadata_arm": "a",
+                "experiment_phase": "metadata",
+                "context": dict(target),
+                "analytics": {"72h": {"score": 60, "source": "youtube_analytics"}},
+            },
+            "legacy": {
+                "metadata_arm": "a",
+                "context": dict(target),
+                "analytics": {"72h": {"score": 100, "source": "youtube_analytics"}},
+            },
+        }
+    }
+    stats = contextual_arm_statistics(state, "metadata_arm", ["a"], target)
+    assert stats["a"]["count"] == 1
+    assert stats["a"]["mean"] == 60
+
+
 def test_contextual_champion_prefers_contextual_mean():
     stats = {
         "global": {"count": 10, "mean": 80, "effective_count": 3, "contextual_mean": 45},
@@ -141,8 +176,16 @@ def test_staged_experiment_only_advances_after_mature_samples():
     state = {"files": {}}
     assert active_experiment(state, config)["name"] == "metadata"
     state["files"] = {
-        "a": {"metadata_arm": "x", "analytics": {"72h": {"score": 50, "source": "youtube_analytics"}}},
-        "b": {"metadata_arm": "y", "analytics": {"72h": {"score": 60, "source": "youtube_analytics"}}},
+        "a": {
+            "metadata_arm": "x",
+            "experiment_phase": "metadata",
+            "analytics": {"72h": {"score": 50, "source": "youtube_analytics"}},
+        },
+        "b": {
+            "metadata_arm": "y",
+            "experiment_phase": "metadata",
+            "analytics": {"72h": {"score": 60, "source": "youtube_analytics"}},
+        },
     }
     assert active_experiment(state, config)["name"] == "publish_time"
 
