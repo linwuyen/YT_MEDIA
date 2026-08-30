@@ -67,6 +67,50 @@ def _weekday_group(value: datetime | None) -> str:
     return "weekend" if value.weekday() >= 5 else "weekday"
 
 
+def _bucket_audio_loudness(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    db = float(value)
+    if db < -30:
+        return "quiet"
+    if db < -18:
+        return "medium"
+    return "loud"
+
+
+def _bucket_silence(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    ratio = float(value)
+    if ratio < 0.05:
+        return "low"
+    if ratio < 0.25:
+        return "medium"
+    return "high"
+
+
+def _bucket_visual_change(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    change = float(value)
+    if change < 3:
+        return "low"
+    if change < 12:
+        return "medium"
+    return "high"
+
+
+def _bucket_scene_density(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    density = float(value)
+    if density < 2:
+        return "low"
+    if density < 8:
+        return "medium"
+    return "high"
+
+
 def build_context(
     *,
     person: str | None,
@@ -76,18 +120,23 @@ def build_context(
     vertical: bool,
     first_second: dict[str, Any] | None,
     publish_at: datetime | None,
+    content_features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     first_second = first_second or {}
-    motion = float(first_second.get("motion_distance") or 0)
-    brightness = float(first_second.get("brightness") or 0)
-    if brightness and brightness < 10:
-        opening = "dark"
-    elif motion <= 1.5 and first_second:
-        opening = "static"
-    elif first_second:
-        opening = "active"
-    else:
+    content_features = content_features or {}
+    motion = float(first_second.get("mean_motion_hamming") or first_second.get("motion_distance") or 0)
+    brightness = float(first_second.get("mean_brightness") or first_second.get("brightness") or 0)
+    if not first_second or first_second.get("available") is False:
         opening = "unknown"
+    elif brightness < 10:
+        opening = "dark"
+    elif motion <= 1.5:
+        opening = "static"
+    else:
+        opening = "active"
+
+    audio = content_features.get("audio", {}) if isinstance(content_features.get("audio", {}), dict) else {}
+    scene = content_features.get("scene", {}) if isinstance(content_features.get("scene", {}), dict) else {}
     return {
         "person": person or "generic",
         "duration_bucket": _bucket_duration(duration),
@@ -95,6 +144,10 @@ def build_context(
         "fps_bucket": "60" if fps >= 50 else ("30" if fps >= 25 else "unknown"),
         "orientation": "vertical" if vertical else "horizontal",
         "opening": opening,
+        "visual_change": _bucket_visual_change(content_features.get("sampled_visual_change_index")),
+        "audio_loudness": _bucket_audio_loudness(audio.get("mean_volume_db")),
+        "silence_ratio": _bucket_silence(audio.get("silence_ratio")),
+        "scene_density": _bucket_scene_density(scene.get("scene_changes_per_minute")),
         "weekday_group": _weekday_group(publish_at),
     }
 
@@ -109,6 +162,10 @@ def context_similarity(left: dict[str, Any] | None, right: dict[str, Any] | None
         "fps_bucket": 0.5,
         "orientation": 0.75,
         "opening": 1.5,
+        "visual_change": 1.0,
+        "audio_loudness": 0.75,
+        "silence_ratio": 0.75,
+        "scene_density": 0.75,
         "weekday_group": 0.75,
     }
     matched = 0.0
@@ -192,7 +249,11 @@ def contextual_arm_statistics(
 
 def champion_arm(stats: dict[str, dict[str, float]], default: str) -> str:
     eligible = [
-        (float(row.get("count", 0)), float(row.get("mean", 0)), arm)
+        (
+            float(row.get("effective_count", row.get("count", 0))),
+            float(row.get("contextual_mean", row.get("mean", 0))),
+            arm,
+        )
         for arm, row in stats.items()
         if float(row.get("count", 0)) > 0
     ]
