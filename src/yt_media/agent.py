@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .core import execution_lock, load_config, make_metadata, read_state, runtime_dir, schedule_slots, write_state
+from .core import load_config, make_metadata, merge_state_documents, read_state, runtime_dir, schedule_slots, write_state
 from .google_api import (
     authorize_drive,
     authorize_youtube,
@@ -20,7 +20,9 @@ from .google_api import (
     existing_publish_times,
     move_file,
     processing_status,
+    read_drive_state,
     upload_video,
+    write_drive_state,
 )
 from .media import probe, remux_primary_streams
 
@@ -40,6 +42,40 @@ def _paths() -> dict[str, Path]:
     }
 
 
+class StateStore:
+    def __init__(self, drive, config: dict[str, Any], local_path: Path):
+        self.drive = drive
+        self.root_id = str(config["drive_root_folder_id"])
+        self.local_path = local_path
+        self.backend = os.environ.get("YT_MEDIA_STATE_BACKEND", "local").strip().lower()
+        self.drive_file_id: str | None = None
+        if self.backend not in {"local", "drive"}:
+            raise RuntimeError("YT_MEDIA_STATE_BACKEND must be 'local' or 'drive'")
+
+    def load(self) -> dict[str, Any]:
+        if self.backend == "drive":
+            state, self.drive_file_id = read_drive_state(self.drive, self.root_id)
+            return state
+        return read_state(self.local_path)
+
+    def save(self, state: dict[str, Any]) -> None:
+        if self.backend == "drive":
+            self.drive_file_id = write_drive_state(
+                self.drive,
+                self.root_id,
+                state,
+                file_id=self.drive_file_id,
+            )
+            return
+        write_state(self.local_path, state)
+
+    @property
+    def label(self) -> str:
+        if self.backend == "drive":
+            return "Google Drive root/.YT_MEDIA_STATE.json"
+        return str(self.local_path)
+
+
 def log_event(event: dict[str, Any]) -> None:
     path = _paths()["log"]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +89,7 @@ def doctor(config: dict[str, Any]) -> int:
     paths = _paths()
     result: dict[str, Any] = {
         "runtime": str(paths["root"]),
-        "state_backend": os.environ.get("YT_MEDIA_STATE_GCS_URI") or str(paths["state"]),
+        "state_backend": os.environ.get("YT_MEDIA_STATE_BACKEND", "local"),
         "client_secret": paths["client"].exists(),
         "drive_token": paths["drive_token"].exists(),
         "youtube_token": paths["youtube_token"].exists(),
@@ -66,20 +102,25 @@ def doctor(config: dict[str, Any]) -> int:
         drive, _ = build_drive(False)
         root = drive.files().get(fileId=config["drive_root_folder_id"], fields="id,name").execute()
         result["drive"] = {"ok": True, "root": root}
+        store = StateStore(drive, config, paths["state"])
+        state = store.load()
+        result["state"] = {"ok": True, "backend": store.label, "entries": len(state.get("files", {}))}
     except Exception as exc:
         result["drive"] = {"ok": False, "error": str(exc)}
+        result["state"] = {"ok": False, "error": str(exc)}
     try:
         _, _, channel = build_youtube(config, False)
         result["youtube"] = {"ok": True, "channel": channel}
     except Exception as exc:
         result["youtube"] = {"ok": False, "error": str(exc)}
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result["drive"]["ok"] and result["youtube"]["ok"] else 1
+    return 0 if result["drive"]["ok"] and result["youtube"]["ok"] and result["state"]["ok"] else 1
 
 
 def queue_report(config: dict[str, Any]) -> int:
     drive, _ = build_drive(False)
-    state = read_state(_paths()["state"])
+    store = StateStore(drive, config, _paths()["state"])
+    state = store.load()
     videos = discover_videos(drive, config)
     rows = []
     for item in videos:
@@ -92,11 +133,34 @@ def queue_report(config: dict[str, Any]) -> int:
             "state": entry.get("status", "new"),
             "youtube_video_id": entry.get("youtube_video_id"),
         })
-    print(json.dumps({"count": len(rows), "videos": rows}, ensure_ascii=False, indent=2))
+    print(json.dumps({"count": len(rows), "state_backend": store.label, "videos": rows}, ensure_ascii=False, indent=2))
     return 0
 
 
-def reconcile_uploaded(drive, youtube, item, entry, config, state) -> bool:
+def seed_drive_state(config: dict[str, Any]) -> int:
+    paths = _paths()
+    if not paths["state"].exists():
+        raise RuntimeError(
+            f"Local state does not exist: {paths['state']}. "
+            "Do not start the GitHub Actions cutover until the previous Windows state is available."
+        )
+    local_state = read_state(paths["state"])
+    drive, _ = build_drive(False)
+    root_id = str(config["drive_root_folder_id"])
+    remote_state, remote_id = read_drive_state(drive, root_id)
+    merged = merge_state_documents(local_state, remote_state)
+    remote_id = write_drive_state(drive, root_id, merged, file_id=remote_id)
+    print(json.dumps({
+        "ok": True,
+        "drive_state_file_id": remote_id,
+        "local_entries": len(local_state.get("files", {})),
+        "existing_drive_entries": len(remote_state.get("files", {})),
+        "merged_entries": len(merged.get("files", {})),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def reconcile_uploaded(drive, youtube, item, entry, config, state, store: StateStore) -> bool:
     video_id = entry.get("youtube_video_id")
     if not video_id or entry.get("moved"):
         return False
@@ -123,7 +187,8 @@ def run_once(config: dict[str, Any]) -> int:
     paths["work"].mkdir(parents=True, exist_ok=True)
     drive, _ = build_drive(False)
     youtube, _, channel = build_youtube(config, False)
-    state = read_state(paths["state"])
+    store = StateStore(drive, config, paths["state"])
+    state = store.load()
     files_state = state.setdefault("files", {})
     videos = discover_videos(drive, config)
 
@@ -131,9 +196,9 @@ def run_once(config: dict[str, Any]) -> int:
         entry = files_state.get(item.file_id)
         if entry and entry.get("youtube_video_id") and not entry.get("moved"):
             try:
-                reconcile_uploaded(drive, youtube, item, entry, config, state)
+                reconcile_uploaded(drive, youtube, item, entry, config, state, store)
             finally:
-                write_state(paths["state"], state)
+                store.save(state)
 
     pending = [
         item for item in videos
@@ -148,6 +213,7 @@ def run_once(config: dict[str, Any]) -> int:
     occupied = existing_publish_times(youtube)
     slots = schedule_slots(config, len(pending), occupied)
     print(f"已驗證頻道：{channel['title']} ({channel['id']})")
+    print(f"State backend：{store.label}")
     print(f"本次準備處理 {len(pending)} 支影片。")
 
     for item, slot in zip(pending, slots):
@@ -161,12 +227,7 @@ def run_once(config: dict[str, Any]) -> int:
             download_file(drive, item.file_id, original, lambda p: print(f"下載 {item.name}: {p * 100:.1f}%", flush=True))
             upload_path = remux_primary_streams(original, cleaned, bool(config.get("remux_with_ffmpeg", True)))
             metadata = make_metadata(item, probe(upload_path), config)
-            log_event({
-                "event": "upload_start",
-                "file": item.name,
-                "title": metadata["title"],
-                "publish_at": slot.isoformat(),
-            })
+            log_event({"event": "upload_start", "file": item.name, "title": metadata["title"], "publish_at": slot.isoformat()})
             response = upload_video(
                 youtube,
                 upload_path,
@@ -185,9 +246,7 @@ def run_once(config: dict[str, Any]) -> int:
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "moved": False,
             })
-            # Persist the YouTube ID before any Drive move. This is the key
-            # idempotency boundary: a retry will reconcile instead of reupload.
-            write_state(paths["state"], state)
+            store.save(state)
             log_event({
                 "event": "upload_success",
                 "file": item.name,
@@ -195,14 +254,14 @@ def run_once(config: dict[str, Any]) -> int:
                 "youtube_url": entry["youtube_url"],
                 "publish_at": slot.isoformat(),
             })
-            reconcile_uploaded(drive, youtube, item, entry, config, state)
-            write_state(paths["state"], state)
+            reconcile_uploaded(drive, youtube, item, entry, config, state, store)
+            store.save(state)
             shutil.rmtree(work_dir, ignore_errors=True)
         except Exception as exc:
             entry["status"] = "error"
             entry["last_error"] = str(exc)
             entry["last_error_at"] = datetime.now(timezone.utc).isoformat()
-            write_state(paths["state"], state)
+            store.save(state)
             log_event({"event": "error", "file": item.name, "error_type": type(exc).__name__, "error": str(exc)})
             if config.get("stop_on_first_error", True):
                 raise
@@ -211,7 +270,7 @@ def run_once(config: dict[str, Any]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="YT_MEDIA Drive → YouTube Agent")
-    parser.add_argument("command", choices=["authorize", "doctor", "queue", "run"])
+    parser.add_argument("command", choices=["authorize", "doctor", "queue", "run", "seed-drive-state"])
     args = parser.parse_args()
     config = load_config(REPO_ROOT)
 
@@ -228,12 +287,10 @@ def main() -> int:
         return doctor(config)
     if args.command == "queue":
         return queue_report(config)
+    if args.command == "seed-drive-state":
+        return seed_drive_state(config)
     if args.command == "run":
-        with execution_lock() as acquired:
-            if not acquired:
-                print("Another cloud execution is active; exiting without doing work.")
-                return 0
-            return run_once(config)
+        return run_once(config)
     return 2
 
 

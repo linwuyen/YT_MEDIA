@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -9,7 +11,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
 
 from .core import VideoItem, runtime_dir, to_utc_iso
 
@@ -18,6 +20,7 @@ YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
+DRIVE_STATE_FILE_NAME = ".YT_MEDIA_STATE.json"
 
 
 def _credential_paths() -> tuple[Path, Path, Path]:
@@ -33,9 +36,6 @@ def _write_token_if_possible(token_path: Path, creds: Credentials) -> None:
         token_path.parent.mkdir(parents=True, exist_ok=True)
         token_path.write_text(creds.to_json(), encoding="utf-8")
     except OSError:
-        # Cloud Run mounts Secret Manager files read-only. A refreshed access
-        # token only needs to live for this process; the refresh token stored in
-        # Secret Manager remains sufficient for the next execution.
         pass
 
 
@@ -57,9 +57,6 @@ def _credentials(token_path: Path, scopes: list[str], interactive: bool) -> Cred
     if not client_secret.exists():
         raise FileNotFoundError(f"找不到 {client_secret}")
 
-    # Drive and YouTube intentionally use separate tokens. Do not enable
-    # incremental authorization, because Google can otherwise return a union of
-    # previously granted scopes and oauthlib rejects that as a scope mismatch.
     flow = InstalledAppFlow.from_client_secrets_file(str(client_secret), scopes=scopes)
     return flow.run_local_server(
         host="localhost",
@@ -135,6 +132,79 @@ def list_children(drive, folder_id: str) -> list[dict[str, Any]]:
         token = response.get("nextPageToken")
         if not token:
             return result
+
+
+def _escape_drive_query(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _find_drive_state_file(drive, root_id: str, file_name: str = DRIVE_STATE_FILE_NAME) -> str | None:
+    escaped = _escape_drive_query(file_name)
+    response = drive.files().list(
+        q=f"'{root_id}' in parents and name = '{escaped}' and trashed = false",
+        spaces="drive",
+        fields="files(id,name,modifiedTime)",
+        pageSize=10,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+    ).execute()
+    files = response.get("files", [])
+    if len(files) > 1:
+        ids = ", ".join(item.get("id", "") for item in files)
+        raise RuntimeError(f"Multiple {file_name} files exist in Drive root: {ids}")
+    return files[0]["id"] if files else None
+
+
+def read_drive_state(
+    drive,
+    root_id: str,
+    file_name: str = DRIVE_STATE_FILE_NAME,
+) -> tuple[dict[str, Any], str | None]:
+    file_id = _find_drive_state_file(drive, root_id, file_name)
+    if not file_id:
+        return {"files": {}}, None
+
+    request = drive.files().get_media(fileId=file_id, supportsAllDrives=True)
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request, chunksize=1024 * 1024)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+
+    raw = buffer.getvalue().decode("utf-8").strip()
+    if not raw:
+        return {"files": {}}, file_id
+    state = json.loads(raw)
+    if not isinstance(state, dict) or not isinstance(state.get("files", {}), dict):
+        raise RuntimeError(f"Invalid Drive state document: {file_name}")
+    state.setdefault("files", {})
+    return state, file_id
+
+
+def write_drive_state(
+    drive,
+    root_id: str,
+    state: dict[str, Any],
+    file_id: str | None = None,
+    file_name: str = DRIVE_STATE_FILE_NAME,
+) -> str:
+    payload = json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8")
+    media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json", resumable=False)
+    if file_id:
+        response = drive.files().update(
+            fileId=file_id,
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True,
+        ).execute()
+    else:
+        response = drive.files().create(
+            body={"name": file_name, "mimeType": "application/json", "parents": [root_id]},
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True,
+        ).execute()
+    return response["id"]
 
 
 def discover_videos(drive, config: dict[str, Any]) -> list[VideoItem]:

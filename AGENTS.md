@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Mission
-Maintain a cloud-hosted Google Drive → YouTube publishing agent for `象兒應援團`.
+Maintain a GitHub Actions-hosted Google Drive → YouTube publishing agent for `象兒應援團`.
 
 ## Non-negotiable safety
 - Never commit OAuth client secrets, refresh/access tokens, downloaded videos, or runtime state.
@@ -14,21 +14,20 @@ Maintain a cloud-hosted Google Drive → YouTube publishing agent for `象兒應
 
 ## Production architecture
 - GitHub `main`: source of truth.
-- GitHub Actions: keyless deployment via Google Workload Identity Federation.
-- Cloud Run Job `yt-media-autopublisher`: production runtime.
-- Cloud Scheduler `yt-media-hourly`: hourly trigger in `Asia/Taipei`.
-- Secret Manager: OAuth client + Drive token + YouTube token.
-- Cloud Storage: persistent `state.json` and distributed execution lock.
-- Cloud Logging: production stdout/stderr logs.
-- Local Windows scripts: bootstrap/migration/emergency console only; do not reintroduce Windows Task Scheduler as the production scheduler.
+- `.github/workflows/publish.yml`: production scheduler/runtime on standard `ubuntu-latest`.
+- GitHub Actions repository secrets: OAuth client + Drive token + YouTube token.
+- Google Drive root `.YT_MEDIA_STATE.json`: persistent idempotency/recovery state.
+- GitHub Actions `concurrency`: prevents overlapping scheduled runs.
+- Local Windows scripts: OAuth bootstrap, one-time migration, and emergency console only. Do not reintroduce Windows Task Scheduler as production scheduling.
+- Google Cloud Run / Cloud Scheduler / Secret Manager / Cloud Storage are not part of production and must not be reintroduced without an explicit architecture decision.
 
 ## Code map
-- `src/yt_media/core.py`: config, metadata, scheduling, local/GCS state, cloud execution lock.
-- `src/yt_media/google_api.py`: OAuth + Drive + YouTube API boundaries; supports read-only Secret Manager mounts.
+- `src/yt_media/core.py`: config, metadata, scheduling, local state, state-merge safety.
+- `src/yt_media/google_api.py`: OAuth + Drive + YouTube API boundaries and Drive-backed state file.
 - `src/yt_media/media.py`: ffprobe / FFmpeg stream cleanup.
-- `src/yt_media/agent.py`: orchestration and CLI.
-- `scripts/deploy_cloud.ps1`: one-time cloud migration and WIF bootstrap.
-- `.github/workflows/deploy-cloud.yml`: continuous deployment from `main`.
+- `src/yt_media/agent.py`: orchestration, local/Drive state selection, migration CLI.
+- `scripts/setup_github_actions.ps1`: one-time Windows → GitHub Actions cutover.
+- `.github/workflows/publish.yml`: hourly publisher.
 
 ## Development
 Run:

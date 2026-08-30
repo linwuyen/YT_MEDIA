@@ -1,24 +1,22 @@
 # YT_MEDIA — Google Drive → YouTube 全自動發布
 
-目標只有一個：**日常使用時，你只負責把影片丟進 Google Drive。電腦可以關機。**
+日常目標只有一個：**把影片丟進 Google Drive，電腦可以關機。**
 
-正式版架構已改成：
+正式版架構：
 
 ```text
 Google Drive「建發用」
         ↓
-Google Cloud Scheduler（每小時）
-        ↓
-Cloud Run Job
+GitHub Actions（每小時）
         ↓
 Drive 掃描 / FFmpeg / metadata / YouTube API
         ↓
 YouTube「象兒應援團」排程發布
         ↓
-成功後移到 04_已上傳
+YouTube processing 成功後移到 04_已上傳
 ```
 
-程式碼放在 GitHub；OAuth 憑證放 Google Secret Manager；防重複狀態放 Cloud Storage。Windows Task Scheduler 不再是正式執行環境。
+不需要 Google Cloud Billing。Cloud Run / Cloud Scheduler / Secret Manager / Cloud Storage 已退出正式架構。
 
 ## 已綁定環境
 
@@ -28,12 +26,12 @@ YouTube「象兒應援團」排程發布
 - Channel ID：`UCzqapvxqSNMeNEM2ng91sow`
 - 預設發布時間：每天 `18:30`（Asia/Taipei）
 - 每輪最多：8 支
-- Cloud Run Job：`yt-media-autopublisher`
-- Cloud Scheduler：`yt-media-hourly`
+- GitHub workflow：`.github/workflows/publish.yml`
+- Persistent state：Google Drive 根目錄 `.YT_MEDIA_STATE.json`
 
 ## 日常使用
 
-只做這件事：
+只做：
 
 ```text
 手機/相機影片 → Google Drive「建發用」底下任一日期資料夾
@@ -43,151 +41,114 @@ Agent 會遞迴掃描：
 
 ```text
 01_優先上傳      → 優先處理
-一般日期資料夾    → 也會處理
+一般日期資料夾    → 處理
 02_待剪輯        → 忽略
 03_重複待刪除    → 忽略
 04_已上傳        → 忽略
 ```
 
-如果日期資料夾沒有 `01_優先上傳`，直接放 MP4/MOV/MKV 也可以。
+日期資料夾沒有 `01_優先上傳` 時，直接放 MP4/MOV/MKV 也會處理。
 
-## 從 Windows 版遷移到雲端：只做一次
+## 一次性：Windows → GitHub Actions
 
-你已經完成 Drive + YouTube OAuth 後，在本機 repo 執行：
+已完成本機 OAuth 的 Windows PC 執行：
 
 ```powershell
 cd C:\YT_MEDIA
 git pull --ff-only origin main
-.\DEPLOY_CLOUD.cmd
+.\SETUP_GITHUB_ACTIONS.cmd
 ```
 
-`DEPLOY_CLOUD.cmd` 會自動完成：
+腳本會：
 
-1. 檢查目前已成功取得的 `client_secret.json` / Drive token / YouTube token。
-2. 安裝或尋找 Google Cloud CLI。
-3. 讓你確認要使用的 Google Cloud Project。
-4. 啟用 Cloud Run、Cloud Scheduler、Secret Manager、Cloud Storage、Cloud Build、Artifact Registry、IAM/WIF 等 API。
-5. 建立 Cloud Run runtime / Scheduler / GitHub deployer service accounts。
-6. 建立 Cloud Storage state bucket。
-7. 把 OAuth JSON/token 放進 Secret Manager；**不放 GitHub**。
-8. 從目前 repo source build 並部署 Cloud Run Job。
-9. 建立每小時 Cloud Scheduler trigger。
-10. 建立 GitHub Actions → Google Cloud 的 Workload Identity Federation（無長效 service-account key）。
-11. 將 Google Cloud 相關的非敏感參數寫入 GitHub repository variables。
-12. 執行一次 Cloud Run Job 做驗收。
-13. **只有驗收成功後**才移除 Windows `YT_MEDIA_AutoPublisher` 排程。
+1. 確認本機 `client_secret.json` / Drive token / YouTube token / `state.json` 都存在。
+2. 暫停 Windows `YT_MEDIA_AutoPublisher`，並等目前 Agent 完全停止。
+3. 將本機 `state.json` 安全合併到 Drive 根目錄 `.YT_MEDIA_STATE.json`；同一 Drive file 若出現不同 YouTube ID 會直接中止，不猜測、不覆蓋。
+4. 將三份 OAuth JSON 透過 GitHub CLI 寫入 GitHub Actions repository secrets；不 commit 到 repo。
+5. 觸發第一次 `publish.yml` 並等待驗收結果。
+6. 只有 Actions 驗收成功才刪除 Windows scheduled task；失敗時若原本 Windows task 是啟用狀態會自動恢復。
 
-Google Cloud 專案必須可使用 Cloud Run 等付費型資源；若專案尚未連結 Billing，Google Cloud 會在部署階段要求先啟用 Billing。
+成功後你的 PC 不需要保持開機。
 
-## 正式執行流程
+## GitHub Actions 正式執行
+
+`publish.yml` 每小時第 17 分執行一次，刻意避開整點高峰；也可以手動 `workflow_dispatch`。
 
 ```text
-Cloud Scheduler
-每小時整點 / Asia/Taipei
+GitHub-hosted ubuntu-latest
         ↓
-Cloud Run Job: yt-media-autopublisher
+GitHub Secrets 還原 OAuth 檔到 runner 暫存
         ↓
-Secret Manager
-client_secret + Drive token + YouTube token
+YT_MEDIA_STATE_BACKEND=drive
         ↓
-嚴格驗證 Channel ID
-UCzqapvxqSNMeNEM2ng91sow
+驗證 Drive + YouTube 頻道
         ↓
-掃描 Google Drive
+讀 .YT_MEDIA_STATE.json
         ↓
-01_優先上傳優先
+掃描 Drive
         ↓
-下載單支影片至 Cloud Run 暫存
+最多處理 8 支
         ↓
-ffprobe + FFmpeg remux
+單支下載 → ffprobe/FFmpeg → YouTube upload
         ↓
-產生標題 / 說明 / hashtag
+立刻把 youtube_video_id 寫回 Drive state
         ↓
-檢查 YouTube 已有 publishAt，避免撞時間
-        ↓
-安排下一個 18:30 空位
-        ↓
-上傳 YouTube
-        ↓
-立刻把 youtube_video_id 寫入 Cloud Storage state.json
-        ↓
-YouTube processing 成功？
-   ├─ 否：下一輪繼續檢查，不重傳
-   └─ 是：Drive 原片移到 04_已上傳
+YouTube processing 成功才移到 04_已上傳
 ```
+
+Workflow 使用 `concurrency`，同一時間只允許一個 publisher run，避免兩輪同時處理同一批影片。
 
 ## 防重複 / 當機恢復
 
-正式版的 state 不再依賴本機檔案，而是：
+最重要的邊界：
 
 ```text
-gs://<PROJECT_ID>-yt-media-state/state.json
+YouTube API 回傳 video_id
+        ↓
+先寫 .YT_MEDIA_STATE.json
+        ↓
+才做後續 processing / Drive move
 ```
 
-Cloud Run 在 YouTube API 回傳 `video_id` 後，會先持久化 state，再進行後續處理。即使 container 在「上傳成功 → 移動 Drive」之間結束，下一輪只會 reconcile 該 YouTube 影片，不會重新 upload。
+因此 runner 在「upload 成功」後即使中斷，下一輪只會 reconcile 該 YouTube video，不會重新上傳同一支 Drive 檔案。
 
-另外會使用同一 bucket 的 lock object 避免兩個 Cloud Run executions 同時處理同一批檔案；異常留下的 lock 會在 6 小時後視為 stale 並自動恢復。
+## Secrets
 
-## OAuth / Secret 安全
-
-正式 Cloud Run 使用 Secret Manager mount：
+GitHub Actions 使用三個 repository secrets：
 
 ```text
-/secrets/client_secret.json
-/secrets/drive_token.json
-/secrets/youtube_token.json
+YT_MEDIA_CLIENT_SECRET_JSON
+YT_MEDIA_DRIVE_TOKEN_JSON
+YT_MEDIA_YOUTUBE_TOKEN_JSON
 ```
 
-Secret volume 是唯讀；refresh token 用來取得新的 access token，新的 access token 只需存在當次 execution 記憶體/暫存中。
+由 `SETUP_GITHUB_ACTIONS.cmd` 從 `%LOCALAPPDATA%\YT_MEDIA` 直接寫入 GitHub Secrets。不要把 OAuth JSON 貼到 Issue、PR、README 或 commit。
 
-永遠不要把下列內容 commit：
+## 排程長期存活
 
-```text
-client_secret*.json
-*token*.json
-gha-creds-*.json
-影片
-state.json
-```
+GitHub 對 public repo 若 60 天沒有 repository activity，可能自動停用 scheduled workflows。`keepalive.yml` 每月建立一個 `[skip ci]` 空 commit，避免 publisher 因 inactivity 被停掉。
 
-## GitHub 自動部署
+## 人物名稱
 
-第一次 `DEPLOY_CLOUD.cmd` 會建立 Workload Identity Federation，並設定 repository variables。之後只要 `main` 的 runtime 相關程式變更：
+人物只從檔名判斷，不做臉部辨識。
 
-```text
-GitHub main
-   ↓
-.github/workflows/deploy-cloud.yml
-   ↓ OIDC / WIF（無 service account key）
-Google Cloud
-   ↓
-Cloud Run Job 更新
-```
-
-因此未來修改 `src/`、`config/`、Dockerfile 或部署 workflow，不需要你的 Windows 電腦保持在線。
-
-## 標題與人物名稱
-
-若檔名包含已知人物名稱，例如：
+例如：
 
 ```text
 李珠垠_001.mp4
-李雅英_002.mp4
 ```
 
-標題會自動帶名字。
-
-若只有：
+可自動帶名字；若是：
 
 ```text
-video_20260718_180654.mp4
+video_20260813_183252.mp4
 ```
 
-Agent 不會猜真人身分，而是使用通用應援標題。人物清單與標題模板在 `config/default.json`。
+就使用通用應援標題，不猜真人身份。
 
-## 本機工具還保留什麼
+## 本機工具
 
-Windows repo 保留作為 bootstrap / migration / emergency console：
+本機保留作 OAuth/bootstrap/emergency console：
 
 ```powershell
 .\scripts\doctor.ps1
@@ -195,16 +156,12 @@ Windows repo 保留作為 bootstrap / migration / emergency console：
 .\RUN_NOW.cmd
 ```
 
-但雲端遷移成功後，日常發布不依賴這些指令，也不依賴 Windows Task Scheduler。
-
-## CI
-
-PR / main 仍會執行 Python compile + pytest。`main` 的 runtime 變更另外會觸發 Cloud Run deployment workflow。
+但 Actions cutover 成功後，不再依賴 Windows Task Scheduler。
 
 ## 不可破壞的安全條件
 
 - OAuth YouTube Channel ID 不等於 `UCzqapvxqSNMeNEM2ng91sow` 就拒絕執行。
-- 已有持久化 `youtube_video_id` 就不重新上傳。
+- 已持久化 `youtube_video_id` 就不重新上傳。
 - YouTube processing 成功後才移動 Drive 原片。
 - 不刪除原始影片。
 - `02_待剪輯`、`03_重複待刪除`、`04_已上傳` 永遠不掃描。
