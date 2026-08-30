@@ -84,6 +84,17 @@ function Ensure-LocalOAuth([string]$Python) {
     Write-Host "Local Google OAuth repaired and verified." -ForegroundColor Green
 }
 
+function Read-Utf8JsonWithoutBom([string]$Path) {
+    $text = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+    if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    # Parse once before sending so malformed JSON is rejected locally rather
+    # than surfacing later inside GitHub Actions.
+    $null = $text | ConvertFrom-Json
+    return $text
+}
+
 function Set-GhSecretFromFile([string]$Gh, [string]$Name, [string]$Path) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Gh
@@ -97,7 +108,7 @@ function Set-GhSecretFromFile([string]$Gh, [string]$Name, [string]$Path) {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $psi
     if (-not $process.Start()) { throw "Could not start gh for secret $Name" }
-    $process.StandardInput.Write([System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8))
+    $process.StandardInput.Write((Read-Utf8JsonWithoutBom $Path))
     $process.StandardInput.Close()
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
