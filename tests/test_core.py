@@ -13,9 +13,9 @@ from yt_media.core import (
 )
 
 
-def sample_item(name="李珠垠_20260728_001.mp4"):
+def sample_item(name="李珠垠_20260728_001.mp4", file_id="abc123"):
     return VideoItem(
-        file_id="abc123",
+        file_id=file_id,
         name=name,
         mime_type="video/mp4",
         size=100,
@@ -32,10 +32,40 @@ def config():
         "timezone": "Asia/Taipei",
         "publish_time": "18:30",
         "minimum_lead_minutes": 90,
+        "metadata_version": 2,
+        "max_description_hashtags": 3,
         "known_people": ["李珠垠", "李雅英"],
-        "named_title_templates": ["{person}應援魅力全開🔥｜球場啦啦隊直拍 4K"],
-        "generic_title_templates": ["球場應援魅力全開🔥｜啦啦隊直拍 4K"],
-        "hashtags": ["啦啦隊", "Shorts"],
+        "named_search_title_terms": [
+            "{person} 啦啦隊應援直拍",
+            "{person} 球場應援直拍",
+        ],
+        "generic_search_title_terms": [
+            "啦啦隊應援直拍",
+            "球場啦啦隊直拍",
+        ],
+        "title_hooks": [
+            "現場氣氛實錄",
+            "應援精彩片段",
+            "球場現場紀錄",
+        ],
+        "title_accents": ["", "🔥"],
+        "description_second_lines": [
+            "保留現場聲音與應援氣氛。",
+            "現場原音完整保留。",
+        ],
+        "hashtag_rotation": ["球場應援", "應援直拍", "Cheerleader"],
+    }
+
+
+def short_media():
+    return {
+        "format": {"duration": "51.6"},
+        "streams": [{
+            "codec_type": "video",
+            "width": 2160,
+            "height": 3840,
+            "avg_frame_rate": "60/1",
+        }],
     }
 
 
@@ -44,12 +74,26 @@ def test_person_and_date_detection():
     assert parse_recording_date("video_20260728_193356.mp4") == "2026.07.28"
 
 
-def test_metadata_adds_person_and_shorts():
-    media = {"format": {"duration": "51.6"}, "streams": [{"codec_type": "video", "width": 2160, "height": 3840}]}
-    meta = make_metadata(sample_item(), media, config())
+def test_metadata_puts_search_terms_first_and_keeps_hashtags_tight():
+    meta = make_metadata(sample_item(), short_media(), config())
     assert meta["person"] == "李珠垠"
-    assert "李珠垠" in meta["title"]
-    assert "#Shorts" in meta["title"]
+    assert meta["title"].startswith("李珠垠")
+    assert "4K" in meta["title"]
+    assert "60fps" in meta["title"]
+    assert "#Shorts" not in meta["title"]
+    assert meta["is_short"] is True
+    assert len(meta["hashtags"]) == 3
+    assert "#李珠垠" in meta["description"]
+    assert "#Shorts" in meta["description"]
+    assert meta["metadata_version"] == 2
+
+
+def test_metadata_is_deterministic_but_varies_by_drive_file():
+    first = make_metadata(sample_item(name="video_20260813_220000.mp4", file_id="drive-a"), short_media(), config())
+    again = make_metadata(sample_item(name="video_20260813_220000.mp4", file_id="drive-a"), short_media(), config())
+    second = make_metadata(sample_item(name="video_20260813_220100.mp4", file_id="drive-b"), short_media(), config())
+    assert first == again
+    assert (first["title"], first["hashtags"]) != (second["title"], second["hashtags"])
 
 
 def test_schedule_skips_today_when_too_late_and_occupied_day():
