@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ from .google_api import (
 from .media import probe, remux_primary_streams
 from .qc import quality_report
 from .strategy import arm_statistics, choose_arm, metadata_config_for_arm, schedule_slots_for_times
+from .thumbnail import set_best_thumbnail
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -200,6 +203,21 @@ def _metadata_arm_ids(config: dict[str, Any]) -> list[str]:
     ]
 
 
+def _identity_aware_item(item, config: dict[str, Any]):
+    """Allow an explicit person folder name to provide identity metadata.
+
+    This is not face recognition. A person is used only when their configured
+    name literally appears in the immediate Drive folder name or filename.
+    """
+    source = re.sub(r"[\s_\-]", "", f"{item.parent_name}{item.name}").lower()
+    filename = re.sub(r"[\s_\-]", "", item.name).lower()
+    for person in config.get("known_people", []):
+        token = re.sub(r"[\s_\-]", "", str(person)).lower()
+        if token and token in source and token not in filename:
+            return replace(item, name=f"{person}_{item.name}")
+    return item
+
+
 def run_once(config: dict[str, Any]) -> int:
     paths = _paths()
     paths["work"].mkdir(parents=True, exist_ok=True)
@@ -304,7 +322,8 @@ def run_once(config: dict[str, Any]) -> int:
                     })
 
             arm_config = metadata_config_for_arm(config, metadata_arm)
-            metadata = make_metadata(item, media_info, arm_config)
+            metadata_item = _identity_aware_item(item, config)
+            metadata = make_metadata(metadata_item, media_info, arm_config)
             log_event({
                 "event": "upload_start",
                 "file": item.name,
@@ -322,6 +341,19 @@ def run_once(config: dict[str, Any]) -> int:
                 lambda p: print(f"上傳 {item.name}: {p * 100:.1f}%", flush=True),
             )
             video_id = response["id"]
+
+            thumbnail_result = None
+            if bool(config.get("thumbnail_best_effort", True)):
+                thumbnail_result = set_best_thumbnail(youtube, video_id, upload_path, media_info, work_dir)
+                log_event({
+                    "event": "thumbnail_result",
+                    "file": item.name,
+                    "youtube_video_id": video_id,
+                    "ok": bool(thumbnail_result.get("ok")),
+                    "reason": thumbnail_result.get("reason"),
+                    "selection": thumbnail_result.get("selection"),
+                })
+
             entry.update({
                 "status": "uploaded",
                 "youtube_video_id": video_id,
@@ -332,6 +364,7 @@ def run_once(config: dict[str, Any]) -> int:
                 "publish_time_arm": publish_time_arm,
                 "publish_at_local": slot.isoformat(),
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "thumbnail": thumbnail_result,
                 "moved": False,
             })
             store.save(state)
