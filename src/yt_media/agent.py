@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .core import load_config, make_metadata, merge_state_documents, read_state, runtime_dir, write_state
+from .core import load_config, make_metadata, media_traits, merge_state_documents, read_state, runtime_dir, write_state
 from .google_api import (
     authorize_drive,
     authorize_youtube,
@@ -25,6 +25,12 @@ from .google_api import (
     read_drive_state,
     upload_video,
     write_drive_state,
+)
+from .learning import (
+    active_experiment,
+    build_context,
+    champion_arm,
+    contextual_arm_statistics,
 )
 from .media import probe, remux_primary_streams
 from .qc import quality_report
@@ -114,6 +120,7 @@ def doctor(config: dict[str, Any]) -> int:
             "backend": store.label,
             "entries": len(state.get("files", {})),
             "strategy": state.get("strategy", {}),
+            "active_experiment": active_experiment(state, config),
         }
     except Exception as exc:
         result["drive"] = {"ok": False, "error": str(exc)}
@@ -144,9 +151,18 @@ def queue_report(config: dict[str, Any]) -> int:
             "youtube_video_id": entry.get("youtube_video_id"),
             "metadata_arm": entry.get("metadata_arm"),
             "publish_time_arm": entry.get("publish_time_arm"),
+            "thumbnail_arm": entry.get("thumbnail_arm"),
+            "experiment_phase": entry.get("experiment_phase"),
+            "context": entry.get("context"),
+            "exact": entry.get("exact"),
             "analytics": entry.get("analytics"),
         })
-    print(json.dumps({"count": len(rows), "state_backend": store.label, "videos": rows}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        "count": len(rows),
+        "state_backend": store.label,
+        "active_experiment": active_experiment(state, config),
+        "videos": rows,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -204,11 +220,7 @@ def _metadata_arm_ids(config: dict[str, Any]) -> list[str]:
 
 
 def _identity_aware_item(item, config: dict[str, Any]):
-    """Allow an explicit person folder name to provide identity metadata.
-
-    This is not face recognition. A person is used only when their configured
-    name literally appears in the immediate Drive folder name or filename.
-    """
+    """Use explicit folder/filename identity only; never infer a real person visually."""
     source = re.sub(r"[\s_\-]", "", f"{item.parent_name}{item.name}").lower()
     filename = re.sub(r"[\s_\-]", "", item.name).lower()
     for person in config.get("known_people", []):
@@ -216,6 +228,23 @@ def _identity_aware_item(item, config: dict[str, Any]):
         if token and token in source and token not in filename:
             return replace(item, name=f"{person}_{item.name}")
     return item
+
+
+def _staged_arm(
+    *,
+    file_id: str,
+    assignment_key: str,
+    arms: list[str],
+    stats: dict[str, dict[str, float]],
+    phase: dict[str, Any],
+    default: str,
+    salt: str,
+    exploration: float,
+) -> str:
+    champion = champion_arm(stats, default)
+    if phase.get("assignment_key") != assignment_key:
+        return champion
+    return choose_arm(file_id, arms, stats, salt=salt, exploration=exploration)
 
 
 def run_once(config: dict[str, Any]) -> int:
@@ -249,21 +278,31 @@ def run_once(config: dict[str, Any]) -> int:
         return 0
 
     exploration = float(config.get("strategy_exploration", 0.35))
+    phase = active_experiment(state, config)
     metadata_arms = _metadata_arm_ids(config) or ["default"]
-    metadata_stats = arm_statistics(state, "metadata_arm", metadata_arms)
-    selected_metadata_arms = [
-        choose_arm(item.file_id, metadata_arms, metadata_stats, salt="metadata", exploration=exploration)
+    metadata_global_stats = arm_statistics(state, "metadata_arm", metadata_arms)
+
+    publish_arms = [str(x) for x in config.get("publish_time_arms", []) if str(x)]
+    if not publish_arms:
+        publish_arms = [str(config.get("publish_time", "18:30"))]
+    publish_stats = arm_statistics(state, "publish_time_arm", publish_arms)
+    default_publish = str(config.get("publish_time", "18:30"))
+    selected_publish_arms = [
+        _staged_arm(
+            file_id=item.file_id,
+            assignment_key="publish_time_arm",
+            arms=publish_arms,
+            stats=publish_stats,
+            phase=phase,
+            default=default_publish,
+            salt="publish-time",
+            exploration=exploration,
+        )
         for item in pending
     ]
 
-    publish_arms = [str(x) for x in config.get("publish_time_arms", []) if str(x)]
-    if not publish_arms or not bool(config.get("publish_time_experiment_enabled", False)):
-        publish_arms = [str(config.get("publish_time", "18:30"))]
-    publish_stats = arm_statistics(state, "publish_time_arm", publish_arms)
-    selected_publish_arms = [
-        choose_arm(item.file_id, publish_arms, publish_stats, salt="publish-time", exploration=exploration)
-        for item in pending
-    ]
+    thumbnail_arms = [str(x) for x in config.get("thumbnail_arms", ["best_frame", "youtube_default"]) if str(x)]
+    thumbnail_stats = arm_statistics(state, "thumbnail_arm", thumbnail_arms)
 
     occupied = existing_publish_times(youtube)
     slots = schedule_slots_for_times(config, selected_publish_arms, occupied)
@@ -271,17 +310,14 @@ def run_once(config: dict[str, Any]) -> int:
     print(f"State backend：{store.label}")
     print(f"本次準備處理 {len(pending)} 支影片。")
     print(json.dumps({
-        "metadata_arm_stats": metadata_stats,
+        "experiment": phase,
+        "metadata_arm_stats": metadata_global_stats,
         "publish_time_stats": publish_stats,
+        "thumbnail_arm_stats": thumbnail_stats,
         "planned_publish_times": selected_publish_arms,
     }, ensure_ascii=False, indent=2))
 
-    for item, slot, metadata_arm, publish_time_arm in zip(
-        pending,
-        slots,
-        selected_metadata_arms,
-        selected_publish_arms,
-    ):
+    for item, slot, publish_time_arm in zip(pending, slots, selected_publish_arms):
         entry = files_state.setdefault(item.file_id, {})
         work_dir = paths["work"] / item.file_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -292,11 +328,13 @@ def run_once(config: dict[str, Any]) -> int:
             download_file(drive, item.file_id, original, lambda p: print(f"下載 {item.name}: {p * 100:.1f}%", flush=True))
             upload_path = remux_primary_streams(original, cleaned, bool(config.get("remux_with_ffmpeg", True)))
             media_info = probe(upload_path)
+            qc: dict[str, Any] = {"warnings": [], "opening_second": {}}
 
             if bool(config.get("qc_enabled", True)):
                 qc = quality_report(upload_path, media_info, files_state, item.file_id, config)
                 entry["media_fingerprint"] = qc["fingerprint"]
                 entry["qc_warnings"] = qc["warnings"]
+                entry["opening_second"] = qc.get("opening_second", {})
                 entry["qc_checked_at"] = datetime.now(timezone.utc).isoformat()
                 if not qc["ok"]:
                     entry["status"] = "qc_rejected"
@@ -321,15 +359,62 @@ def run_once(config: dict[str, Any]) -> int:
                         "warnings": qc["warnings"],
                     })
 
-            arm_config = metadata_config_for_arm(config, metadata_arm)
             metadata_item = _identity_aware_item(item, config)
+            traits = media_traits(media_info)
+            preliminary = make_metadata(metadata_item, media_info, config)
+            context = build_context(
+                person=preliminary.get("person"),
+                duration=float(traits.get("duration") or 0),
+                quality=str(traits.get("quality") or ""),
+                fps=float(traits.get("fps") or 0),
+                vertical=bool(traits.get("vertical")),
+                first_second=qc.get("opening_second"),
+                publish_at=slot,
+            )
+            metadata_context_stats = contextual_arm_statistics(
+                state,
+                "metadata_arm",
+                metadata_arms,
+                context,
+            )
+            metadata_arm = _staged_arm(
+                file_id=item.file_id,
+                assignment_key="metadata_arm",
+                arms=metadata_arms,
+                stats=metadata_context_stats,
+                phase=phase,
+                default=str(config.get("default_metadata_arm") or metadata_arms[0]),
+                salt="metadata",
+                exploration=exploration,
+            )
+            thumbnail_context_stats = contextual_arm_statistics(
+                state,
+                "thumbnail_arm",
+                thumbnail_arms,
+                context,
+            )
+            thumbnail_arm = _staged_arm(
+                file_id=item.file_id,
+                assignment_key="thumbnail_arm",
+                arms=thumbnail_arms,
+                stats=thumbnail_context_stats,
+                phase=phase,
+                default=str(config.get("default_thumbnail_arm", "best_frame")),
+                salt="thumbnail",
+                exploration=exploration,
+            )
+
+            arm_config = metadata_config_for_arm(config, metadata_arm)
             metadata = make_metadata(metadata_item, media_info, arm_config)
             log_event({
                 "event": "upload_start",
                 "file": item.name,
                 "title": metadata["title"],
+                "experiment_phase": phase.get("name"),
                 "metadata_arm": metadata_arm,
                 "publish_time_arm": publish_time_arm,
+                "thumbnail_arm": thumbnail_arm,
+                "context": context,
                 "publish_at": slot.isoformat(),
             })
             response = upload_video(
@@ -342,17 +427,20 @@ def run_once(config: dict[str, Any]) -> int:
             )
             video_id = response["id"]
 
-            thumbnail_result = None
-            if bool(config.get("thumbnail_best_effort", True)):
+            thumbnail_result: dict[str, Any] | None = None
+            if thumbnail_arm == "best_frame" and bool(config.get("thumbnail_best_effort", True)):
                 thumbnail_result = set_best_thumbnail(youtube, video_id, upload_path, media_info, work_dir)
-                log_event({
-                    "event": "thumbnail_result",
-                    "file": item.name,
-                    "youtube_video_id": video_id,
-                    "ok": bool(thumbnail_result.get("ok")),
-                    "reason": thumbnail_result.get("reason"),
-                    "selection": thumbnail_result.get("selection"),
-                })
+            else:
+                thumbnail_result = {"ok": True, "reason": "youtube_default_selected"}
+            log_event({
+                "event": "thumbnail_result",
+                "file": item.name,
+                "youtube_video_id": video_id,
+                "thumbnail_arm": thumbnail_arm,
+                "ok": bool(thumbnail_result.get("ok")),
+                "reason": thumbnail_result.get("reason"),
+                "selection": thumbnail_result.get("selection"),
+            })
 
             entry.update({
                 "status": "uploaded",
@@ -362,6 +450,10 @@ def run_once(config: dict[str, Any]) -> int:
                 "metadata_version": metadata.get("metadata_version"),
                 "metadata_arm": metadata_arm,
                 "publish_time_arm": publish_time_arm,
+                "thumbnail_arm": thumbnail_arm,
+                "experiment_phase": phase.get("name"),
+                "context": context,
+                "media_duration_seconds": round(float(traits.get("duration") or 0), 3),
                 "publish_at_local": slot.isoformat(),
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "thumbnail": thumbnail_result,
@@ -373,8 +465,10 @@ def run_once(config: dict[str, Any]) -> int:
                 "file": item.name,
                 "youtube_video_id": video_id,
                 "youtube_url": entry["youtube_url"],
+                "experiment_phase": phase.get("name"),
                 "metadata_arm": metadata_arm,
                 "publish_time_arm": publish_time_arm,
+                "thumbnail_arm": thumbnail_arm,
                 "publish_at": slot.isoformat(),
             })
             reconcile_uploaded(drive, youtube, item, entry, config, state, store)
