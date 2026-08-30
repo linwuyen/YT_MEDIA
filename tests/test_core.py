@@ -1,7 +1,16 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from yt_media.core import VideoItem, detect_person, make_metadata, parse_recording_date, schedule_slots
+import pytest
+
+from yt_media.core import (
+    VideoItem,
+    detect_person,
+    make_metadata,
+    merge_state_documents,
+    parse_recording_date,
+    schedule_slots,
+)
 
 
 def sample_item(name="李珠垠_20260728_001.mp4"):
@@ -51,3 +60,29 @@ def test_schedule_skips_today_when_too_late_and_occupied_day():
     slots = schedule_slots(cfg, 2, occupied, now=now)
     assert slots[0].strftime("%Y-%m-%d %H:%M") == "2026-08-11 18:30"
     assert slots[1].strftime("%Y-%m-%d %H:%M") == "2026-08-12 18:30"
+
+
+def test_state_merge_preserves_uploaded_id_and_done_state():
+    local = {
+        "files": {
+            "drive-1": {"youtube_video_id": "yt-1", "status": "uploaded", "moved": False},
+            "drive-2": {"youtube_video_id": "yt-2", "status": "done", "moved": True},
+        }
+    }
+    remote = {
+        "files": {
+            "drive-1": {"youtube_video_id": "yt-1", "status": "processing", "moved": False},
+            "drive-3": {"youtube_video_id": "yt-3", "status": "done", "moved": True},
+        }
+    }
+    merged = merge_state_documents(local, remote)
+    assert merged["files"]["drive-1"]["youtube_video_id"] == "yt-1"
+    assert merged["files"]["drive-2"]["moved"] is True
+    assert merged["files"]["drive-3"]["moved"] is True
+
+
+def test_state_merge_rejects_conflicting_youtube_ids():
+    local = {"files": {"drive-1": {"youtube_video_id": "yt-a"}}}
+    remote = {"files": {"drive-1": {"youtube_video_id": "yt-b"}}}
+    with pytest.raises(RuntimeError, match="State conflict"):
+        merge_state_documents(local, remote)
