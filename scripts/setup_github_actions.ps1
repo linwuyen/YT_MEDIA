@@ -10,6 +10,7 @@ $Runtime = Join-Path $env:LOCALAPPDATA "YT_MEDIA"
 $ClientSecret = Join-Path $Runtime "client_secret.json"
 $DriveToken = Join-Path $Runtime "drive_token.json"
 $YouTubeToken = Join-Path $Runtime "youtube_token.json"
+$YouTubeManageToken = Join-Path $Runtime "youtube_manage_token.json"
 $LocalState = Join-Path $Runtime "state.json"
 $LocalLock = Join-Path $Runtime "agent.lock"
 
@@ -84,13 +85,33 @@ function Ensure-LocalOAuth([string]$Python) {
     Write-Host "Local Google OAuth repaired and verified." -ForegroundColor Green
 }
 
+function Ensure-MetadataOAuth([string]$Python) {
+    Write-Host "Verifying YouTube metadata editor OAuth..." -ForegroundColor Cyan
+    if (Test-Path $YouTubeManageToken) {
+        $old = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $Python -m yt_media.metadata_optimizer doctor | Out-Host
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $old
+        }
+        if ($code -eq 0) {
+            Write-Host "YouTube metadata editor OAuth is valid." -ForegroundColor Green
+            return
+        }
+    }
+
+    Write-Host "One additional YouTube authorization is required to edit titles/descriptions of already-uploaded scheduled videos." -ForegroundColor Yellow
+    Invoke-Checked $Python @("-m","yt_media.metadata_optimizer","authorize") "YouTube metadata editor authorization"
+    Invoke-Checked $Python @("-m","yt_media.metadata_optimizer","doctor") "Verify YouTube metadata editor OAuth"
+}
+
 function Read-Utf8JsonWithoutBom([string]$Path) {
     $text = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
     if ($text.Length -gt 0 -and [int][char]$text[0] -eq 0xFEFF) {
         $text = $text.Substring(1)
     }
-    # Parse once before sending so malformed JSON is rejected locally rather
-    # than surfacing later inside GitHub Actions.
     $null = $text | ConvertFrom-Json
     return $text
 }
@@ -155,12 +176,9 @@ function Wait-LocalAgentIdle {
     throw "Timed out waiting for the Windows uploader to stop."
 }
 
-Write-Host "=== YT_MEDIA -> GitHub Actions cutover ===" -ForegroundColor Cyan
+Write-Host "=== YT_MEDIA -> GitHub Actions setup ===" -ForegroundColor Cyan
 Write-Host "No Google Cloud Billing is required."
 
-# client_secret + state are the only files that must pre-exist. OAuth token
-# files are deliberately repairable here because old refresh tokens can expire
-# or be revoked between the Windows installation and this cutover.
 foreach ($required in @($ClientSecret, $LocalState)) {
     if (-not (Test-Path $required)) {
         throw "Missing required migration file: $required"
@@ -170,9 +188,8 @@ foreach ($required in @($ClientSecret, $LocalState)) {
 $Python = Join-Path $Repo ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) { throw "Missing Python environment: $Python. Run INSTALL.cmd first." }
 
-# Repair OAuth before freezing the Windows publisher. This prevents a stale
-# token from leaving the system in a half-cutover state.
 Ensure-LocalOAuth $Python
+Ensure-MetadataOAuth $Python
 
 $Gh = Ensure-Gh
 if (-not (Test-CommandOk $Gh @("auth","status"))) {
@@ -200,8 +217,9 @@ try {
     Set-GhSecretFromFile $Gh "YT_MEDIA_CLIENT_SECRET_JSON" $ClientSecret
     Set-GhSecretFromFile $Gh "YT_MEDIA_DRIVE_TOKEN_JSON" $DriveToken
     Set-GhSecretFromFile $Gh "YT_MEDIA_YOUTUBE_TOKEN_JSON" $YouTubeToken
+    Set-GhSecretFromFile $Gh "YT_MEDIA_YOUTUBE_MANAGE_TOKEN_JSON" $YouTubeManageToken
 
-    Write-Host "Starting the first GitHub Actions publisher run..." -ForegroundColor Cyan
+    Write-Host "Starting a GitHub Actions verification run..." -ForegroundColor Cyan
     Invoke-Checked $Gh @("workflow","run",$Workflow,"--repo",$GithubRepo,"--ref","main") "Start GitHub Actions workflow"
     Start-Sleep -Seconds 5
 
@@ -219,19 +237,19 @@ try {
     }
 
     Write-Host ""
-    Write-Host "GitHub Actions cutover complete." -ForegroundColor Green
+    Write-Host "GitHub Actions setup complete." -ForegroundColor Green
     Write-Host "Runtime: GitHub-hosted ubuntu-latest"
     Write-Host "Schedule: hourly at minute 17"
     Write-Host "State: Google Drive root/.YT_MEDIA_STATE.json"
-    Write-Host "Secrets: GitHub Actions repository secrets"
-    Write-Host "Your PC no longer needs to stay on."
+    Write-Host "Metadata: diversified title/description/hashtags + refresh for unpublished scheduled videos"
+    Write-Host "Your PC does not need to stay on."
 } catch {
     if ($WasEnabled -and (Get-ScheduledTask -TaskName $WindowsTaskName -ErrorAction SilentlyContinue)) {
         try {
             Enable-ScheduledTask -TaskName $WindowsTaskName | Out-Null
-            Write-Warning "Cutover failed; Windows scheduled task was restored."
+            Write-Warning "Setup failed; Windows scheduled task was restored."
         } catch {
-            Write-Warning "Cutover failed and Windows scheduled task could not be restored automatically."
+            Write-Warning "Setup failed and Windows scheduled task could not be restored automatically."
         }
     }
     throw
