@@ -1,6 +1,12 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from yt_media.learning import (
+    active_experiment,
+    build_context,
+    contextual_arm_statistics,
+    score_dimensions,
+)
 from yt_media.qc import fingerprint_distance, find_duplicate
 from yt_media.strategy import (
     arm_statistics,
@@ -33,18 +39,35 @@ def test_performance_score_rewards_retention_and_engagement():
     assert strong > weak
     assert 0 <= weak <= 100
     assert 0 <= strong <= 100
+    dimensions = score_dimensions({
+        "views": 1000,
+        "engagedViews": 900,
+        "averageViewPercentage": 92,
+        "likes": 80,
+        "comments": 10,
+        "shares": 15,
+        "subscribersGained": 8,
+    })
+    assert set(dimensions) == {"reach", "retention", "engagement", "conversion", "total"}
 
 
-def test_arm_statistics_prefers_mature_window():
+def test_arm_statistics_prefers_mature_learning_window_and_ignores_fallback():
     state = {
         "files": {
             "a": {
                 "metadata_arm": "direct",
-                "analytics": {"24h": {"score": 30}, "72h": {"score": 70}},
+                "analytics": {
+                    "24h": {"score": 30, "source": "youtube_analytics"},
+                    "72h": {"score": 70, "source": "youtube_analytics"},
+                },
             },
             "b": {
                 "metadata_arm": "direct",
-                "analytics": {"7d": {"score": 90}},
+                "analytics": {"7d": {"score": 90, "source": "youtube_analytics"}},
+            },
+            "fallback": {
+                "metadata_arm": "direct",
+                "analytics": {"7d": {"score": 100, "source": "data_api_fallback"}},
             },
         }
     }
@@ -52,6 +75,74 @@ def test_arm_statistics_prefers_mature_window():
     assert stats["direct"]["count"] == 2
     assert stats["direct"]["mean"] == 80
     assert stats["live"]["count"] == 0
+
+
+def test_contextual_stats_weight_matching_context_more():
+    target = {
+        "person": "卡洛琳",
+        "duration_bucket": "16-30",
+        "quality": "4K",
+        "fps_bucket": "60",
+        "orientation": "vertical",
+        "opening": "active",
+        "weekday_group": "weekend",
+    }
+    state = {
+        "files": {
+            "similar": {
+                "metadata_arm": "a",
+                "context": dict(target),
+                "analytics": {"72h": {"score": 90, "source": "youtube_analytics"}},
+            },
+            "different": {
+                "metadata_arm": "a",
+                "context": {
+                    "person": "generic",
+                    "duration_bucket": "91-180",
+                    "quality": "unknown",
+                    "fps_bucket": "30",
+                    "orientation": "horizontal",
+                    "opening": "static",
+                    "weekday_group": "weekday",
+                },
+                "analytics": {"72h": {"score": 10, "source": "youtube_analytics"}},
+            },
+        }
+    }
+    stats = contextual_arm_statistics(state, "metadata_arm", ["a", "b"], target)
+    assert stats["a"]["contextual_mean"] > stats["a"]["mean"]
+    assert stats["b"]["count"] == 0
+
+
+def test_staged_experiment_only_advances_after_mature_samples():
+    config = {
+        "experiment_plan": [
+            {"name": "metadata", "assignment_key": "metadata_arm", "mature_window": "72h", "min_mature_samples": 2},
+            {"name": "publish_time", "assignment_key": "publish_time_arm", "mature_window": "72h", "min_mature_samples": 1},
+        ]
+    }
+    state = {"files": {}}
+    assert active_experiment(state, config)["name"] == "metadata"
+    state["files"] = {
+        "a": {"metadata_arm": "x", "analytics": {"72h": {"score": 50, "source": "youtube_analytics"}}},
+        "b": {"metadata_arm": "y", "analytics": {"72h": {"score": 60, "source": "youtube_analytics"}}},
+    }
+    assert active_experiment(state, config)["name"] == "publish_time"
+
+
+def test_context_builder_buckets_opening_and_duration():
+    context = build_context(
+        person="卡洛琳",
+        duration=28.0,
+        quality="4K",
+        fps=59.94,
+        vertical=True,
+        first_second={"brightness": 80, "motion_distance": 8},
+        publish_at=datetime(2026, 9, 5, 18, 30, tzinfo=ZoneInfo("Asia/Taipei")),
+    )
+    assert context["duration_bucket"] == "16-30"
+    assert context["opening"] == "active"
+    assert context["weekday_group"] == "weekend"
 
 
 def test_choose_arm_is_retry_stable():
@@ -83,7 +174,7 @@ def test_adaptive_schedule_keeps_one_video_per_day():
     config = {"timezone": "Asia/Taipei", "minimum_lead_minutes": 90}
     tz = ZoneInfo("Asia/Taipei")
     now = datetime(2026, 9, 1, 12, 0, tzinfo=tz)
-    occupied = ["2026-09-02T10:30:00Z"]  # 18:30 local, blocks Sep 2 entirely
+    occupied = ["2026-09-02T10:30:00Z"]
     slots = schedule_slots_for_times(config, ["17:30", "21:30", "19:30"], occupied, now=now)
     assert [x.strftime("%Y-%m-%d") for x in slots] == ["2026-09-01", "2026-09-03", "2026-09-04"]
     assert [x.strftime("%H:%M") for x in slots] == ["17:30", "21:30", "19:30"]
