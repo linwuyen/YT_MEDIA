@@ -204,6 +204,7 @@ def contextual_arm_statistics(
     assignment_key: str,
     arms: Iterable[str],
     context: dict[str, Any] | None = None,
+    experiment_phase: str | None = None,
 ) -> dict[str, dict[str, float]]:
     arm_list = [str(x) for x in arms]
     rows: dict[str, list[tuple[float, float]]] = defaultdict(list)
@@ -211,6 +212,8 @@ def contextual_arm_statistics(
     if isinstance(files, dict):
         for entry in files.values():
             if not isinstance(entry, dict):
+                continue
+            if experiment_phase and str(entry.get("experiment_phase") or "") != experiment_phase:
                 continue
             arm = str(entry.get(assignment_key) or "")
             if arm not in arm_list:
@@ -263,13 +266,20 @@ def champion_arm(stats: dict[str, dict[str, float]], default: str) -> str:
     return eligible[0][2]
 
 
-def mature_sample_count(state: dict[str, Any], assignment_key: str, preferred_window: str = "72h") -> int:
+def mature_sample_count(
+    state: dict[str, Any],
+    assignment_key: str,
+    preferred_window: str = "72h",
+    experiment_phase: str | None = None,
+) -> int:
     files = state.get("files", {}) if isinstance(state, dict) else {}
     total = 0
     if not isinstance(files, dict):
         return 0
     for entry in files.values():
         if not isinstance(entry, dict) or not entry.get(assignment_key):
+            continue
+        if experiment_phase and str(entry.get("experiment_phase") or "") != experiment_phase:
             continue
         analytics = entry.get("analytics", {})
         if not isinstance(analytics, dict):
@@ -287,15 +297,16 @@ def active_experiment(state: dict[str, Any], config: dict[str, Any]) -> dict[str
     for phase in plan:
         if not isinstance(phase, dict):
             continue
+        name = str(phase.get("name") or phase.get("assignment_key") or "")
         key = str(phase.get("assignment_key") or "")
         if not key:
             continue
         minimum = int(phase.get("min_mature_samples", 24))
         window = str(phase.get("mature_window", "72h"))
-        count = mature_sample_count(state, key, window)
+        count = mature_sample_count(state, key, window, experiment_phase=name)
         if count < minimum:
             return {
-                "name": str(phase.get("name") or key),
+                "name": name,
                 "assignment_key": key,
                 "mature_window": window,
                 "mature_samples": count,
