@@ -7,6 +7,11 @@ from typing import Any, Iterable
 
 
 LEARNING_SOURCES = {"youtube_analytics"}
+EXPERIMENT_PHASE_BY_KEY = {
+    "metadata_arm": "metadata",
+    "publish_time_arm": "publish_time",
+    "thumbnail_arm": "thumbnail",
+}
 
 
 def score_dimensions(metrics: dict[str, Any]) -> dict[str, float]:
@@ -206,6 +211,8 @@ def contextual_arm_statistics(
     context: dict[str, Any] | None = None,
     experiment_phase: str | None = None,
 ) -> dict[str, dict[str, float]]:
+    if experiment_phase is None:
+        experiment_phase = EXPERIMENT_PHASE_BY_KEY.get(assignment_key)
     arm_list = [str(x) for x in arms]
     rows: dict[str, list[tuple[float, float]]] = defaultdict(list)
     files = state.get("files", {}) if isinstance(state, dict) else {}
@@ -272,6 +279,8 @@ def mature_sample_count(
     preferred_window: str = "72h",
     experiment_phase: str | None = None,
 ) -> int:
+    if experiment_phase is None:
+        experiment_phase = EXPERIMENT_PHASE_BY_KEY.get(assignment_key)
     files = state.get("files", {}) if isinstance(state, dict) else {}
     total = 0
     if not isinstance(files, dict):
