@@ -89,6 +89,9 @@ jobs:
       - name: Verify Drive and YouTube identity
         run: python -m yt_media.agent doctor
 
+      - name: Collect analytics and update strategy
+        run: python -m yt_media.analytics_optimizer collect
+
       - name: Refresh unpublished metadata
         run: python -m yt_media.metadata_optimizer refresh
 
