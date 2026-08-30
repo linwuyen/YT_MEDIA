@@ -18,6 +18,7 @@ def arm_statistics(
     state: dict[str, Any],
     assignment_key: str,
     arms: Iterable[str],
+    experiment_phase: str | None = None,
 ) -> dict[str, dict[str, float]]:
     result = {str(arm): {"count": 0.0, "mean": 50.0} for arm in arms}
     sums = {str(arm): 0.0 for arm in arms}
@@ -27,6 +28,8 @@ def arm_statistics(
 
     for entry in files.values():
         if not isinstance(entry, dict):
+            continue
+        if experiment_phase and str(entry.get("experiment_phase") or "") != experiment_phase:
             continue
         arm = str(entry.get(assignment_key) or "")
         if arm not in result:
