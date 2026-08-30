@@ -15,7 +15,7 @@ def probe(path: Path) -> dict[str, Any]:
         result = subprocess.run(
             [
                 exe, "-v", "error",
-                "-show_entries", "format=duration:stream=index,codec_type,width,height,r_frame_rate",
+                "-show_entries", "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate,sample_rate,channels",
                 "-of", "json", str(path),
             ],
             check=True,
