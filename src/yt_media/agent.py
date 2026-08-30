@@ -447,20 +447,9 @@ def run_once(config: dict[str, Any]) -> int:
             )
             video_id = response["id"]
 
-            if thumbnail_arm == "best_frame" and bool(config.get("thumbnail_best_effort", True)):
-                thumbnail_result = set_best_thumbnail(youtube, video_id, upload_path, media_info, work_dir)
-            else:
-                thumbnail_result = {"ok": True, "reason": "youtube_default_selected"}
-            log_event({
-                "event": "thumbnail_result",
-                "file": item.name,
-                "youtube_video_id": video_id,
-                "thumbnail_arm": thumbnail_arm,
-                "ok": bool(thumbnail_result.get("ok")),
-                "reason": thumbnail_result.get("reason"),
-                "selection": thumbnail_result.get("selection"),
-            })
-
+            # Critical idempotency boundary: persist the YouTube ID immediately.
+            # Nothing fallible (thumbnail, processing checks, Drive move) may run
+            # between upload success and this durable state write.
             entry.update({
                 "status": "uploaded",
                 "youtube_video_id": video_id,
@@ -476,7 +465,7 @@ def run_once(config: dict[str, Any]) -> int:
                 "media_duration_seconds": round(float(traits.get("duration") or 0), 3),
                 "publish_at_local": slot.isoformat(),
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
-                "thumbnail": thumbnail_result,
+                "thumbnail": {"ok": False, "reason": "not_attempted_yet"},
                 "moved": False,
             })
             store.save(state)
@@ -491,6 +480,30 @@ def run_once(config: dict[str, Any]) -> int:
                 "thumbnail_arm": thumbnail_arm,
                 "publish_at": slot.isoformat(),
             })
+
+            try:
+                if thumbnail_arm == "best_frame" and bool(config.get("thumbnail_best_effort", True)):
+                    thumbnail_result = set_best_thumbnail(youtube, video_id, upload_path, media_info, work_dir)
+                else:
+                    thumbnail_result = {"ok": True, "reason": "youtube_default_selected"}
+            except Exception as thumbnail_exc:
+                thumbnail_result = {
+                    "ok": False,
+                    "reason": "thumbnail_exception",
+                    "error": str(thumbnail_exc)[:500],
+                }
+            entry["thumbnail"] = thumbnail_result
+            store.save(state)
+            log_event({
+                "event": "thumbnail_result",
+                "file": item.name,
+                "youtube_video_id": video_id,
+                "thumbnail_arm": thumbnail_arm,
+                "ok": bool(thumbnail_result.get("ok")),
+                "reason": thumbnail_result.get("reason"),
+                "selection": thumbnail_result.get("selection"),
+            })
+
             reconcile_uploaded(drive, youtube, item, entry, config, state, store)
             store.save(state)
             shutil.rmtree(work_dir, ignore_errors=True)
