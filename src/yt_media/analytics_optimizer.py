@@ -11,7 +11,7 @@ from googleapiclient.errors import HttpError
 
 from .core import load_config
 from .google_api import build_drive, read_drive_state, write_drive_state
-from .metadata_optimizer import build_editor
+from .metadata_optimizer import build_editor, manage_token_path
 from .strategy import arm_statistics, performance_score
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -64,11 +64,13 @@ def _data_api_fallback(youtube, video_id: str) -> dict[str, float]:
     if not items:
         return {}
     stats = items[0].get("statistics", {})
+
     def number(name: str) -> float:
         try:
             return float(stats.get(name) or 0)
         except (TypeError, ValueError):
             return 0.0
+
     views = number("viewCount")
     return {
         "views": views,
@@ -88,10 +90,16 @@ def _window_definitions(config: dict[str, Any]) -> list[tuple[str, timedelta]]:
 
 
 def collect(config: dict[str, Any]) -> int:
-    if not Path(str(config.get("drive_root_folder_id", ""))):
-        raise RuntimeError("drive_root_folder_id is required")
+    if not manage_token_path().exists():
+        print("Analytics/metadata management token 尚未設定；略過 feedback loop，不影響正常上傳。")
+        return 0
 
-    youtube, creds, channel = build_editor(config, interactive=False)
+    try:
+        youtube, creds, channel = build_editor(config, interactive=False)
+    except Exception as exc:
+        print(json.dumps({"event": "analytics_skipped", "reason": str(exc)}, ensure_ascii=False))
+        return 0
+
     try:
         analytics = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
     except Exception:
@@ -120,8 +128,6 @@ def collect(config: dict[str, Any]) -> int:
             if now < publish_at + window_age:
                 continue
             existing = analytics_state.get(window_name)
-            # Once a window has been captured after a grace period, keep it stable
-            # so arm comparisons use roughly equal-age observations.
             if isinstance(existing, dict) and existing.get("captured_at"):
                 continue
 
