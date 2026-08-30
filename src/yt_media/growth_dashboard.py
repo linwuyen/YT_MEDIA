@@ -153,6 +153,10 @@ def build_dashboard(state: dict[str, Any], config: dict[str, Any], now: datetime
         "content_correlations": {
             "opening": _group_scores(files, "opening"),
             "duration_bucket": _group_scores(files, "duration_bucket"),
+            "visual_change": _group_scores(files, "visual_change"),
+            "audio_loudness": _group_scores(files, "audio_loudness"),
+            "silence_ratio": _group_scores(files, "silence_ratio"),
+            "scene_density": _group_scores(files, "scene_density"),
             "person": _group_scores(files, "person"),
             "weekday_group": _group_scores(files, "weekday_group"),
         },
