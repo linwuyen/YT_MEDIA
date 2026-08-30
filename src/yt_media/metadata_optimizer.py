@@ -15,10 +15,14 @@ from googleapiclient.discovery import build
 
 from .core import VideoItem, load_config, make_metadata, runtime_dir
 from .google_api import build_drive, read_drive_state, write_drive_state
+from .learning import active_experiment, champion_arm
 from .strategy import arm_statistics, choose_arm, metadata_config_for_arm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANAGE_SCOPES = ["https://www.googleapis.com/auth/youtube"]
+MANAGE_SCOPES = [
+    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/yt-analytics.readonly",
+]
 
 
 def _client_secret_path() -> Path:
@@ -36,6 +40,11 @@ def _write_token(path: Path, creds: Credentials) -> None:
     path.write_text(creds.to_json(), encoding="utf-8")
 
 
+def _has_required_scopes(creds: Credentials) -> bool:
+    granted = set(creds.granted_scopes or creds.scopes or [])
+    return set(MANAGE_SCOPES).issubset(granted)
+
+
 def _credentials(interactive: bool) -> Credentials:
     token_path = manage_token_path()
     creds: Credentials | None = None
@@ -44,16 +53,18 @@ def _credentials(interactive: bool) -> Credentials:
             creds = Credentials.from_authorized_user_file(str(token_path), scopes=MANAGE_SCOPES)
         except Exception:
             creds = None
+    if creds and not _has_required_scopes(creds):
+        creds = None
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
             _write_token(token_path, creds)
         except Exception:
             creds = None
-    if creds and creds.valid:
+    if creds and creds.valid and _has_required_scopes(creds):
         return creds
     if not interactive:
-        raise RuntimeError(f"Metadata editor 尚未授權：{token_path.name}")
+        raise RuntimeError(f"Metadata/Analytics OAuth 尚未授權完整 scope：{token_path.name}")
 
     client_secret = _client_secret_path()
     if not client_secret.exists():
@@ -65,7 +76,7 @@ def _credentials(interactive: bool) -> Credentials:
         open_browser=True,
         access_type="offline",
         prompt="consent select_account",
-        success_message="YouTube metadata authorization completed. You may close this window.",
+        success_message="YouTube metadata and analytics authorization completed. You may close this window.",
     )
     _write_token(token_path, creds)
     return creds
@@ -99,14 +110,20 @@ def authorize(config: dict[str, Any]) -> int:
     except OSError:
         pass
     _, _, channel = build_editor(config, interactive=True)
-    print(json.dumps({"ok": True, "channel": channel, "token": str(path)}, ensure_ascii=False, indent=2))
+    print(json.dumps({"ok": True, "channel": channel, "token": str(path), "scopes": MANAGE_SCOPES}, ensure_ascii=False, indent=2))
     return 0
 
 
 def doctor(config: dict[str, Any]) -> int:
     try:
-        _, _, channel = build_editor(config, interactive=False)
-        print(json.dumps({"ok": True, "channel": channel, "token": str(manage_token_path())}, ensure_ascii=False, indent=2))
+        _, creds, channel = build_editor(config, interactive=False)
+        print(json.dumps({
+            "ok": True,
+            "channel": channel,
+            "token": str(manage_token_path()),
+            "required_scopes": MANAGE_SCOPES,
+            "granted_scopes": list(creds.granted_scopes or creds.scopes or []),
+        }, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc), "token": str(manage_token_path())}, ensure_ascii=False, indent=2))
@@ -199,6 +216,9 @@ def refresh(config: dict[str, Any]) -> int:
     ] or ["default"]
     arm_stats = arm_statistics(state, "metadata_arm", arm_ids)
     exploration = float(config.get("strategy_exploration", 0.35))
+    phase = active_experiment(state, config)
+    default_arm = str(config.get("default_metadata_arm") or arm_ids[0])
+    champion = champion_arm(arm_stats, default_arm)
     publish_arms = set(str(x) for x in config.get("publish_time_arms", []))
 
     for file_id, entry in files_state.items():
@@ -227,13 +247,16 @@ def refresh(config: dict[str, Any]) -> int:
             continue
 
         if not entry.get("metadata_arm"):
-            entry["metadata_arm"] = choose_arm(
-                file_id,
-                arm_ids,
-                arm_stats,
-                salt="metadata",
-                exploration=exploration,
-            )
+            if phase.get("assignment_key") == "metadata_arm":
+                entry["metadata_arm"] = choose_arm(
+                    file_id,
+                    arm_ids,
+                    arm_stats,
+                    salt="metadata",
+                    exploration=exploration,
+                )
+            else:
+                entry["metadata_arm"] = champion
         if not entry.get("publish_time_arm") and entry.get("publish_at_local"):
             try:
                 local_dt = datetime.fromisoformat(str(entry["publish_at_local"]).replace("Z", "+00:00"))
@@ -278,6 +301,7 @@ def refresh(config: dict[str, Any]) -> int:
         "metadata_version": target_version,
         "refreshed": refreshed,
         "already_current": marked_current,
+        "experiment": phase,
         "arm_stats": arm_stats,
     }, ensure_ascii=False, indent=2))
     return 0
