@@ -45,6 +45,21 @@ jobs:
           printf '%s' "$CLIENT_SECRET_JSON" > "$runtime/client_secret.json"
           printf '%s' "$DRIVE_TOKEN_JSON" > "$runtime/drive_token.json"
           printf '%s' "$YOUTUBE_TOKEN_JSON" > "$runtime/youtube_token.json"
+
+          # Windows OAuth JSON files may contain an UTF-8 BOM. GitHub Secrets
+          # preserve it byte-for-byte, while Python's JSON loader rejects it.
+          # Normalize all restored JSON files before the agent reads them.
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime = Path("${{ runner.temp }}") / "YT_MEDIA"
+          for name in ("client_secret.json", "drive_token.json", "youtube_token.json"):
+              path = runtime / name
+              data = path.read_bytes()
+              if data.startswith(b"\xef\xbb\xbf"):
+                  path.write_bytes(data[3:])
+          PY
+
           chmod 600 "$runtime"/*.json
           echo "YT_MEDIA_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
           echo "YT_MEDIA_CLIENT_SECRET_PATH=$runtime/client_secret.json" >> "$GITHUB_ENV"
