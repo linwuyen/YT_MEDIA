@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from yt_media.learning import (
     active_experiment,
     build_context,
+    champion_arm,
     contextual_arm_statistics,
     score_dimensions,
 )
@@ -85,6 +86,10 @@ def test_contextual_stats_weight_matching_context_more():
         "fps_bucket": "60",
         "orientation": "vertical",
         "opening": "active",
+        "visual_change": "high",
+        "audio_loudness": "loud",
+        "silence_ratio": "low",
+        "scene_density": "medium",
         "weekday_group": "weekend",
     }
     state = {
@@ -103,6 +108,10 @@ def test_contextual_stats_weight_matching_context_more():
                     "fps_bucket": "30",
                     "orientation": "horizontal",
                     "opening": "static",
+                    "visual_change": "low",
+                    "audio_loudness": "quiet",
+                    "silence_ratio": "high",
+                    "scene_density": "low",
                     "weekday_group": "weekday",
                 },
                 "analytics": {"72h": {"score": 10, "source": "youtube_analytics"}},
@@ -112,6 +121,14 @@ def test_contextual_stats_weight_matching_context_more():
     stats = contextual_arm_statistics(state, "metadata_arm", ["a", "b"], target)
     assert stats["a"]["contextual_mean"] > stats["a"]["mean"]
     assert stats["b"]["count"] == 0
+
+
+def test_contextual_champion_prefers_contextual_mean():
+    stats = {
+        "global": {"count": 10, "mean": 80, "effective_count": 3, "contextual_mean": 45},
+        "matched": {"count": 6, "mean": 65, "effective_count": 5, "contextual_mean": 88},
+    }
+    assert champion_arm(stats, "global") == "matched"
 
 
 def test_staged_experiment_only_advances_after_mature_samples():
@@ -130,18 +147,27 @@ def test_staged_experiment_only_advances_after_mature_samples():
     assert active_experiment(state, config)["name"] == "publish_time"
 
 
-def test_context_builder_buckets_opening_and_duration():
+def test_context_builder_buckets_opening_duration_audio_and_motion():
     context = build_context(
         person="卡洛琳",
         duration=28.0,
         quality="4K",
         fps=59.94,
         vertical=True,
-        first_second={"brightness": 80, "motion_distance": 8},
+        first_second={"mean_brightness": 80, "mean_motion_hamming": 8, "available": True},
+        content_features={
+            "sampled_visual_change_index": 15,
+            "audio": {"mean_volume_db": -12, "silence_ratio": 0.02},
+            "scene": {"scene_changes_per_minute": 5},
+        },
         publish_at=datetime(2026, 9, 5, 18, 30, tzinfo=ZoneInfo("Asia/Taipei")),
     )
     assert context["duration_bucket"] == "16-30"
     assert context["opening"] == "active"
+    assert context["visual_change"] == "high"
+    assert context["audio_loudness"] == "loud"
+    assert context["silence_ratio"] == "low"
+    assert context["scene_density"] == "medium"
     assert context["weekday_group"] == "weekend"
 
 
