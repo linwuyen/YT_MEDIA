@@ -90,10 +90,16 @@ jobs:
         run: python -m yt_media.agent doctor
 
       - name: Collect analytics and update strategy
-        run: python -m yt_media.analytics_optimizer collect
+        shell: bash
+        run: |
+          python -m yt_media.analytics_optimizer collect || \
+            echo "::warning::Analytics optimizer failed; continuing with the last known strategy."
 
       - name: Refresh unpublished metadata
-        run: python -m yt_media.metadata_optimizer refresh
+        shell: bash
+        run: |
+          python -m yt_media.metadata_optimizer refresh || \
+            echo "::warning::Metadata refresh failed; continuing with normal publishing."
 
       - name: Publish next batch
         run: python -m yt_media.agent run
