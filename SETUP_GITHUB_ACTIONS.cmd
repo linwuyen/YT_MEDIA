@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\enable_youtube_analytics.ps1"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\setup_github_actions.ps1"
 set "EXITCODE=%ERRORLEVEL%"
 pause
