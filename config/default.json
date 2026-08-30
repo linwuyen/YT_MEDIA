@@ -15,7 +15,8 @@
   "default_language": "zh-TW",
   "remux_with_ffmpeg": true,
   "stop_on_first_error": true,
-  "metadata_version": 2,
+
+  "metadata_version": 3,
   "metadata_refresh_max_per_run": 12,
   "max_description_hashtags": 3,
   "known_people": ["李珠垠", "朴星垠", "卡洛琳", "安娜", "李雅英"],
@@ -65,5 +66,28 @@
     "Cheerleader",
     "現場直拍",
     "4K直拍"
-  ]
+  ],
+  "metadata_arms": [
+    {"id": "direct", "search_index": 0, "hook_index": 0, "hashtag_index": 0},
+    {"id": "stadium", "search_index": 1, "hook_index": 2, "hashtag_index": 1},
+    {"id": "live", "search_index": 2, "hook_index": 6, "hashtag_index": 4},
+    {"id": "quality", "search_index": 3, "hook_index": 3, "hashtag_index": 5},
+    {"id": "moment", "search_index": 4, "hook_index": 9, "hashtag_index": 2},
+    {"id": "energy", "search_index": 5, "hook_index": 1, "hashtag_index": 3}
+  ],
+  "strategy_exploration": 0.35,
+
+  "publish_time_arms": ["17:30", "18:30", "19:30", "20:30", "21:30"],
+  "publish_time_experiment_enabled": true,
+
+  "analytics_windows_hours": {"24h": 24, "72h": 72, "7d": 168},
+
+  "qc_enabled": true,
+  "qc_min_duration_seconds": 2.0,
+  "qc_warn_short_edge": 720,
+  "qc_dark_brightness_warning": 8.0,
+  "qc_low_contrast_warning": 4.0,
+  "qc_static_hamming_warning": 1.5,
+  "duplicate_duration_tolerance_seconds": 1.5,
+  "duplicate_hamming_threshold": 2.0
 }
