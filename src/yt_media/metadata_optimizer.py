@@ -40,31 +40,48 @@ def _write_token(path: Path, creds: Credentials) -> None:
     path.write_text(creds.to_json(), encoding="utf-8")
 
 
-def _has_required_scopes(creds: Credentials) -> bool:
-    granted = set(creds.granted_scopes or creds.scopes or [])
-    return set(MANAGE_SCOPES).issubset(granted)
+def _stored_scopes(path: Path) -> set[str]:
+    """Read scopes that were actually persisted with the OAuth token.
+
+    Do not infer permission from scopes passed into Credentials.from_* because
+    requested scopes can make an old token look broader than it was granted.
+    """
+    if not path.exists():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    raw = payload.get("scopes", []) if isinstance(payload, dict) else []
+    if isinstance(raw, str):
+        raw = raw.split()
+    return {str(scope) for scope in raw if str(scope)} if isinstance(raw, list) else set()
+
+
+def _has_required_stored_scopes(path: Path) -> bool:
+    return set(MANAGE_SCOPES).issubset(_stored_scopes(path))
 
 
 def _credentials(interactive: bool) -> Credentials:
     token_path = manage_token_path()
     creds: Credentials | None = None
-    if token_path.exists():
+    if token_path.exists() and _has_required_stored_scopes(token_path):
         try:
             creds = Credentials.from_authorized_user_file(str(token_path), scopes=MANAGE_SCOPES)
         except Exception:
             creds = None
-    if creds and not _has_required_scopes(creds):
-        creds = None
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
             _write_token(token_path, creds)
         except Exception:
             creds = None
-    if creds and creds.valid and _has_required_scopes(creds):
+    if creds and creds.valid and _has_required_stored_scopes(token_path):
         return creds
     if not interactive:
-        raise RuntimeError(f"Metadata/Analytics OAuth 尚未授權完整 scope：{token_path.name}")
+        missing = sorted(set(MANAGE_SCOPES) - _stored_scopes(token_path))
+        suffix = f"；缺少 scope: {', '.join(missing)}" if missing else ""
+        raise RuntimeError(f"Metadata/Analytics OAuth 尚未授權完整 scope：{token_path.name}{suffix}")
 
     client_secret = _client_secret_path()
     if not client_secret.exists():
@@ -79,6 +96,8 @@ def _credentials(interactive: bool) -> Credentials:
         success_message="YouTube metadata and analytics authorization completed. You may close this window.",
     )
     _write_token(token_path, creds)
+    if not _has_required_stored_scopes(token_path):
+        raise RuntimeError("Google OAuth 完成，但 token 未包含完整 YouTube metadata + Analytics scopes")
     return creds
 
 
@@ -110,23 +129,34 @@ def authorize(config: dict[str, Any]) -> int:
     except OSError:
         pass
     _, _, channel = build_editor(config, interactive=True)
-    print(json.dumps({"ok": True, "channel": channel, "token": str(path), "scopes": MANAGE_SCOPES}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        "ok": True,
+        "channel": channel,
+        "token": str(path),
+        "scopes": sorted(_stored_scopes(path)),
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
 def doctor(config: dict[str, Any]) -> int:
     try:
-        _, creds, channel = build_editor(config, interactive=False)
+        _, _, channel = build_editor(config, interactive=False)
         print(json.dumps({
             "ok": True,
             "channel": channel,
             "token": str(manage_token_path()),
             "required_scopes": MANAGE_SCOPES,
-            "granted_scopes": list(creds.granted_scopes or creds.scopes or []),
+            "stored_scopes": sorted(_stored_scopes(manage_token_path())),
         }, ensure_ascii=False, indent=2))
         return 0
     except Exception as exc:
-        print(json.dumps({"ok": False, "error": str(exc), "token": str(manage_token_path())}, ensure_ascii=False, indent=2))
+        print(json.dumps({
+            "ok": False,
+            "error": str(exc),
+            "token": str(manage_token_path()),
+            "required_scopes": MANAGE_SCOPES,
+            "stored_scopes": sorted(_stored_scopes(manage_token_path())),
+        }, ensure_ascii=False, indent=2))
         return 1
 
 
@@ -204,7 +234,7 @@ def refresh(config: dict[str, Any]) -> int:
     root_id = str(config["drive_root_folder_id"])
     state, state_file_id = read_drive_state(drive, root_id)
     files_state = state.setdefault("files", {})
-    target_version = int(config.get("metadata_version", 3))
+    target_version = int(config.get("metadata_version", 4))
     limit = int(config.get("metadata_refresh_max_per_run", 12))
     refreshed = 0
     marked_current = 0
