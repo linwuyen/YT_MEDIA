@@ -45,7 +45,11 @@ def _window_snapshot(entry: dict[str, Any], preferred: Iterable[str] = ("7d", "7
         return None
     for name in preferred:
         snapshot = analytics.get(name)
-        if isinstance(snapshot, dict) and snapshot.get("score") is not None:
+        if (
+            isinstance(snapshot, dict)
+            and snapshot.get("score") is not None
+            and snapshot.get("training_eligible", True) is not False
+        ):
             return snapshot
     return None
 
@@ -121,11 +125,7 @@ def choose_arm(
 
 
 def metadata_config_for_arm(config: dict[str, Any], arm_id: str | None) -> dict[str, Any]:
-    """Return a shallow config variant that makes an experiment arm stable.
-
-    Each arm owns a search-term style, hook style, and rotating hashtag family;
-    other wording still varies deterministically by Drive file ID.
-    """
+    """Return a shallow config variant that makes an experiment arm stable."""
     if not arm_id:
         return config
     arm = next(
@@ -158,12 +158,7 @@ def schedule_slots_for_times(
     occupied_publish_at: Iterable[str],
     now: datetime | None = None,
 ) -> list[datetime]:
-    """Schedule at most one channel upload per local calendar day.
-
-    Each pending video may carry a different learned publish-time arm. Existing
-    scheduled uploads block their entire local date, preventing accidental
-    same-day cannibalization during the experiment.
-    """
+    """Schedule at most one channel upload per local calendar day."""
     tz = ZoneInfo(str(config["timezone"]))
     now = now.astimezone(tz) if now else datetime.now(tz)
     lead = timedelta(minutes=int(config.get("minimum_lead_minutes", 90)))
