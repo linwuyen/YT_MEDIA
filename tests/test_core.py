@@ -83,8 +83,9 @@ def test_metadata_puts_search_terms_first_and_keeps_hashtags_tight():
     assert "#Shorts" not in meta["title"]
     assert meta["is_short"] is True
     assert len(meta["hashtags"]) == 3
+    assert meta["hashtags"][:2] == ["李珠垠", "啦啦隊"]
     assert "#李珠垠" in meta["description"]
-    assert "#Shorts" in meta["description"]
+    assert "#啦啦隊" in meta["description"]
     assert meta["metadata_version"] == 2
 
 
