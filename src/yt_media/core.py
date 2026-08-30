@@ -121,52 +121,173 @@ def detect_person(filename: str, known_people: Iterable[str]) -> str | None:
     return None
 
 
-def is_short(media_info: dict[str, Any]) -> bool:
+def _primary_video_stream(media_info: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return next(s for s in media_info.get("streams", []) if s.get("codec_type") == "video")
+    except StopIteration:
+        return {}
+
+
+def _parse_rate(value: Any) -> float:
+    if value in (None, "", "0/0"):
+        return 0.0
+    text = str(value)
+    if "/" in text:
+        left, right = text.split("/", 1)
+        try:
+            denominator = float(right)
+            return float(left) / denominator if denominator else 0.0
+        except ValueError:
+            return 0.0
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def media_traits(media_info: dict[str, Any]) -> dict[str, Any]:
+    video = _primary_video_stream(media_info)
     try:
         duration = float(media_info.get("format", {}).get("duration") or 0)
-        video = next(s for s in media_info.get("streams", []) if s.get("codec_type") == "video")
-        width = int(video.get("width") or 0)
-        height = int(video.get("height") or 0)
-        return bool(width and height and height > width and 0 < duration <= 180)
-    except (StopIteration, TypeError, ValueError):
-        return False
+    except (TypeError, ValueError):
+        duration = 0.0
+    width = int(video.get("width") or 0)
+    height = int(video.get("height") or 0)
+    fps = _parse_rate(video.get("avg_frame_rate") or video.get("r_frame_rate"))
+    vertical = bool(width and height and height > width)
+    short = bool(vertical and 0 < duration <= 180)
+    long_edge = max(width, height)
+    short_edge = min(width, height)
+
+    if long_edge >= 3840 and short_edge >= 2160:
+        quality = "4K"
+    elif long_edge >= 2160 and short_edge >= 1080:
+        quality = "高畫質"
+    else:
+        quality = ""
+
+    fps_label = "60fps" if fps >= 50 else ("30fps" if fps >= 25 else "")
+    return {
+        "duration": duration,
+        "width": width,
+        "height": height,
+        "fps": fps,
+        "vertical": vertical,
+        "short": short,
+        "quality": quality,
+        "fps_label": fps_label,
+    }
+
+
+def is_short(media_info: dict[str, Any]) -> bool:
+    return bool(media_traits(media_info)["short"])
+
+
+def _pick(values: list[str], digest: int, salt: int = 0) -> str:
+    if not values:
+        return ""
+    shifted = digest >> (salt * 5)
+    return values[shifted % len(values)]
+
+
+def _clean_title(parts: Iterable[str]) -> str:
+    text = " ".join(part.strip() for part in parts if part and part.strip())
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def make_metadata(item: VideoItem, media_info: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     person = detect_person(item.name, config.get("known_people", []))
     date_text = parse_recording_date(item.name)
-    digest = int(hashlib.sha256(item.file_id.encode("utf-8")).hexdigest()[:8], 16)
+    digest = int(hashlib.sha256(item.file_id.encode("utf-8")).hexdigest()[:16], 16)
+    traits = media_traits(media_info)
 
     if person:
-        templates = config["named_title_templates"]
-        title = templates[digest % len(templates)].format(person=person)
-        intro = f"{date_text} {person}球場應援直拍🔥" if date_text else f"{person}球場應援直拍🔥"
-        tags = [person, *config.get("hashtags", [])]
+        search_terms = [
+            value.format(person=person)
+            for value in config.get("named_search_title_terms", ["{person} 啦啦隊應援直拍"])
+        ]
     else:
-        templates = config["generic_title_templates"]
-        title = templates[digest % len(templates)]
-        intro = f"{date_text} 球場啦啦隊應援直拍🔥" if date_text else "球場啦啦隊應援直拍🔥"
-        tags = list(config.get("hashtags", []))
+        search_terms = list(config.get("generic_search_title_terms", ["啦啦隊應援直拍"]))
 
-    short = is_short(media_info)
-    if short and "#Shorts" not in title:
-        title += " #Shorts"
+    hooks = list(config.get("title_hooks", ["球場現場氣氛實錄"]))
+    search_term = _pick(search_terms, digest, 0)
+    hook = _pick(hooks, digest, 2)
 
-    hashtags = " ".join("#" + tag.lstrip("#").replace(" ", "") for tag in tags)
+    tech = " ".join(bit for bit in (traits["quality"], traits["fps_label"]) if bit)
+    title_left = _clean_title([search_term, tech])
+    accent = _pick(list(config.get("title_accents", ["", "", "🔥", "✨"])), digest, 4)
+    title = f"{title_left}｜{hook}{accent}".strip()[:100].rstrip()
+
+    duration = traits["duration"]
+    duration_text = f"{max(1, round(duration))} 秒" if duration else ""
+    subject = f"{person}啦啦隊應援" if person else "球場啦啦隊應援"
+    media_words = _clean_title([
+        traits["quality"],
+        traits["fps_label"],
+        "直式直拍" if traits["vertical"] else "現場直拍",
+    ])
+    first_line = _clean_title([date_text, subject, media_words])
+    first_line += f"，{duration_text}現場片段。" if duration_text else "。"
+
+    second_lines = list(config.get(
+        "description_second_lines",
+        [
+            "保留現場聲音與應援氣氛，更多球場直拍持續更新。",
+            "高畫質記錄球場應援現場，喜歡這類直拍可以訂閱追蹤。",
+            "現場原音與應援氣氛完整保留，更多片段會持續上線。",
+        ],
+    ))
+    second_line = _pick(second_lines, digest, 3)
+
+    hashtag_candidates = [person, "啦啦隊"] if person else ["啦啦隊"]
+    rotating = list(config.get(
+        "hashtag_rotation",
+        ["球場應援", "應援直拍", "啦啦隊女孩", "Cheerleader", "現場直拍", "4K直拍"],
+    ))
+    hashtag_candidates.append(_pick(rotating, digest, 5))
+    if traits["short"]:
+        hashtag_candidates.append("Shorts")
+    elif traits["quality"] == "4K":
+        hashtag_candidates.append("4K")
+
+    hashtags: list[str] = []
+    limit = int(config.get("max_description_hashtags", 3))
+    for tag in hashtag_candidates:
+        if not tag:
+            continue
+        clean = str(tag).lstrip("#").replace(" ", "")
+        if clean and clean not in hashtags:
+            hashtags.append(clean)
+        if len(hashtags) >= limit:
+            break
+
+    hashtag_line = " ".join(f"#{tag}" for tag in hashtags)
     description = (
-        f"{intro}\n"
-        "4K 高畫質記錄現場舞蹈、表情與球場應援氣氛。\n\n"
+        f"{first_line}\n"
+        f"{second_line}\n\n"
         "你最喜歡哪個瞬間？留言告訴我👇\n"
-        "喜歡球場應援直拍，記得訂閱「象兒應援團」！\n\n"
-        f"{hashtags}"
+        f"{hashtag_line}"
     )
+
+    tags = list(dict.fromkeys([
+        *([person] if person else []),
+        "啦啦隊",
+        "球場應援",
+        "應援直拍",
+        "Cheerleader",
+        *(["Shorts"] if traits["short"] else []),
+        *(["4K"] if traits["quality"] == "4K" else []),
+    ]))
+
     return {
-        "title": title[:100],
+        "title": title,
         "description": description,
-        "tags": list(dict.fromkeys(tag.lstrip("#") for tag in tags))[:15],
+        "tags": tags[:15],
+        "hashtags": hashtags,
         "person": person,
         "recording_date": date_text,
-        "is_short": short,
+        "is_short": traits["short"],
+        "metadata_version": int(config.get("metadata_version", 2)),
     }
 
 
