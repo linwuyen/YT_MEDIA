@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .core import load_config, make_metadata, merge_state_documents, read_state, runtime_dir, schedule_slots, write_state
+from .core import load_config, make_metadata, merge_state_documents, read_state, runtime_dir, write_state
 from .google_api import (
     authorize_drive,
     authorize_youtube,
@@ -25,6 +25,8 @@ from .google_api import (
     write_drive_state,
 )
 from .media import probe, remux_primary_streams
+from .qc import quality_report
+from .strategy import arm_statistics, choose_arm, metadata_config_for_arm, schedule_slots_for_times
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -104,7 +106,12 @@ def doctor(config: dict[str, Any]) -> int:
         result["drive"] = {"ok": True, "root": root}
         store = StateStore(drive, config, paths["state"])
         state = store.load()
-        result["state"] = {"ok": True, "backend": store.label, "entries": len(state.get("files", {}))}
+        result["state"] = {
+            "ok": True,
+            "backend": store.label,
+            "entries": len(state.get("files", {})),
+            "strategy": state.get("strategy", {}),
+        }
     except Exception as exc:
         result["drive"] = {"ok": False, "error": str(exc)}
         result["state"] = {"ok": False, "error": str(exc)}
@@ -132,6 +139,9 @@ def queue_report(config: dict[str, Any]) -> int:
             "folder": item.parent_name,
             "state": entry.get("status", "new"),
             "youtube_video_id": entry.get("youtube_video_id"),
+            "metadata_arm": entry.get("metadata_arm"),
+            "publish_time_arm": entry.get("publish_time_arm"),
+            "analytics": entry.get("analytics"),
         })
     print(json.dumps({"count": len(rows), "state_backend": store.label, "videos": rows}, ensure_ascii=False, indent=2))
     return 0
@@ -182,6 +192,14 @@ def reconcile_uploaded(drive, youtube, item, entry, config, state, store: StateS
     return True
 
 
+def _metadata_arm_ids(config: dict[str, Any]) -> list[str]:
+    return [
+        str(item["id"])
+        for item in config.get("metadata_arms", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+
+
 def run_once(config: dict[str, Any]) -> int:
     paths = _paths()
     paths["work"].mkdir(parents=True, exist_ok=True)
@@ -200,23 +218,52 @@ def run_once(config: dict[str, Any]) -> int:
             finally:
                 store.save(state)
 
+    blocked_statuses = {"qc_rejected"}
     pending = [
         item for item in videos
         if not files_state.get(item.file_id, {}).get("youtube_video_id")
         and not files_state.get(item.file_id, {}).get("moved")
+        and files_state.get(item.file_id, {}).get("status") not in blocked_statuses
     ][: int(config.get("max_uploads_per_run", 8))]
 
     if not pending:
         print("沒有新的待上傳影片。")
         return 0
 
+    exploration = float(config.get("strategy_exploration", 0.35))
+    metadata_arms = _metadata_arm_ids(config) or ["default"]
+    metadata_stats = arm_statistics(state, "metadata_arm", metadata_arms)
+    selected_metadata_arms = [
+        choose_arm(item.file_id, metadata_arms, metadata_stats, salt="metadata", exploration=exploration)
+        for item in pending
+    ]
+
+    publish_arms = [str(x) for x in config.get("publish_time_arms", []) if str(x)]
+    if not publish_arms or not bool(config.get("publish_time_experiment_enabled", False)):
+        publish_arms = [str(config.get("publish_time", "18:30"))]
+    publish_stats = arm_statistics(state, "publish_time_arm", publish_arms)
+    selected_publish_arms = [
+        choose_arm(item.file_id, publish_arms, publish_stats, salt="publish-time", exploration=exploration)
+        for item in pending
+    ]
+
     occupied = existing_publish_times(youtube)
-    slots = schedule_slots(config, len(pending), occupied)
+    slots = schedule_slots_for_times(config, selected_publish_arms, occupied)
     print(f"已驗證頻道：{channel['title']} ({channel['id']})")
     print(f"State backend：{store.label}")
     print(f"本次準備處理 {len(pending)} 支影片。")
+    print(json.dumps({
+        "metadata_arm_stats": metadata_stats,
+        "publish_time_stats": publish_stats,
+        "planned_publish_times": selected_publish_arms,
+    }, ensure_ascii=False, indent=2))
 
-    for item, slot in zip(pending, slots):
+    for item, slot, metadata_arm, publish_time_arm in zip(
+        pending,
+        slots,
+        selected_metadata_arms,
+        selected_publish_arms,
+    ):
         entry = files_state.setdefault(item.file_id, {})
         work_dir = paths["work"] / item.file_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -226,8 +273,46 @@ def run_once(config: dict[str, Any]) -> int:
             log_event({"event": "download_start", "file": item.name, "drive_file_id": item.file_id})
             download_file(drive, item.file_id, original, lambda p: print(f"下載 {item.name}: {p * 100:.1f}%", flush=True))
             upload_path = remux_primary_streams(original, cleaned, bool(config.get("remux_with_ffmpeg", True)))
-            metadata = make_metadata(item, probe(upload_path), config)
-            log_event({"event": "upload_start", "file": item.name, "title": metadata["title"], "publish_at": slot.isoformat()})
+            media_info = probe(upload_path)
+
+            if bool(config.get("qc_enabled", True)):
+                qc = quality_report(upload_path, media_info, files_state, item.file_id, config)
+                entry["media_fingerprint"] = qc["fingerprint"]
+                entry["qc_warnings"] = qc["warnings"]
+                entry["qc_checked_at"] = datetime.now(timezone.utc).isoformat()
+                if not qc["ok"]:
+                    entry["status"] = "qc_rejected"
+                    entry["qc_blockers"] = qc["blockers"]
+                    entry["duplicate_of"] = qc.get("duplicate")
+                    store.save(state)
+                    log_event({
+                        "event": "qc_rejected",
+                        "file": item.name,
+                        "drive_file_id": item.file_id,
+                        "blockers": qc["blockers"],
+                        "warnings": qc["warnings"],
+                        "duplicate": qc.get("duplicate"),
+                    })
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                    continue
+                if qc["warnings"]:
+                    log_event({
+                        "event": "qc_warning",
+                        "file": item.name,
+                        "drive_file_id": item.file_id,
+                        "warnings": qc["warnings"],
+                    })
+
+            arm_config = metadata_config_for_arm(config, metadata_arm)
+            metadata = make_metadata(item, media_info, arm_config)
+            log_event({
+                "event": "upload_start",
+                "file": item.name,
+                "title": metadata["title"],
+                "metadata_arm": metadata_arm,
+                "publish_time_arm": publish_time_arm,
+                "publish_at": slot.isoformat(),
+            })
             response = upload_video(
                 youtube,
                 upload_path,
@@ -242,6 +327,9 @@ def run_once(config: dict[str, Any]) -> int:
                 "youtube_video_id": video_id,
                 "youtube_url": f"https://youtu.be/{video_id}",
                 "title": metadata["title"],
+                "metadata_version": metadata.get("metadata_version"),
+                "metadata_arm": metadata_arm,
+                "publish_time_arm": publish_time_arm,
                 "publish_at_local": slot.isoformat(),
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "moved": False,
@@ -252,6 +340,8 @@ def run_once(config: dict[str, Any]) -> int:
                 "file": item.name,
                 "youtube_video_id": video_id,
                 "youtube_url": entry["youtube_url"],
+                "metadata_arm": metadata_arm,
+                "publish_time_arm": publish_time_arm,
                 "publish_at": slot.isoformat(),
             })
             reconcile_uploaded(drive, youtube, item, entry, config, state, store)
