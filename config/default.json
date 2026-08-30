@@ -116,6 +116,7 @@
   "qc_static_hamming_warning": 1.5,
   "duplicate_duration_tolerance_seconds": 1.5,
   "duplicate_hamming_threshold": 2.0,
+  "content_analysis_max_seconds": 45.0,
 
   "thumbnail_best_effort": true
 }
