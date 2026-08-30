@@ -1,62 +1,68 @@
-# YT_MEDIA — Google Drive → YouTube 全自動發布
+# YT_MEDIA — Google Drive → YouTube 自動成長系統
 
 日常目標只有一個：**把影片丟進 Google Drive，電腦可以關機。**
-
-正式版架構：
 
 ```text
 Google Drive「建發用」
         ↓
-GitHub Actions（每小時）
+GitHub Actions（每小時第 17 分）
         ↓
-Analytics feedback / metadata strategy / media QC
+Analytics feedback / staged experiment / media QC
         ↓
 Drive 掃描 / FFmpeg / YouTube API
         ↓
 YouTube「象兒應援團」排程發布
         ↓
-24h / 72h / 7d 成效回寫
+1h / 6h / 24h / 72h / 7d exact snapshot
++ 24h / 72h / 7d YouTube Analytics
+        ↓
+Growth Dashboard / contextual learner
         ↺
-下一批自動偏向表現較好的 metadata / 發布時段
+下一批策略
 ```
 
-不需要 Google Cloud Billing。Cloud Run / Cloud Scheduler / Secret Manager / Cloud Storage 已退出正式架構。
+正式 runtime 不需要 Google Cloud Billing。Cloud Run / Cloud Scheduler / Secret Manager / Cloud Storage 已退出正式架構。
 
 ## 已綁定環境
 
 - Google Drive 根目錄：`建發用`
 - Drive Folder ID：`1vg-sHZfam52sAZWqMu6uIHhUUqSZEC8x`
-- YouTube 頻道：`象兒應援團`
+- YouTube：`象兒應援團`
 - Channel ID：`UCzqapvxqSNMeNEM2ng91sow`
-- 發布時段實驗：`17:30 / 18:30 / 19:30 / 20:30 / 21:30`（Asia/Taipei）
-- 每個日期最多安排一支，避免同日互相吃流量
-- 每輪最多處理：8 支
-- GitHub workflow：`.github/workflows/publish.yml`
+- 每輪最多：8 支
+- 每個日期最多安排一支
 - Persistent state：Google Drive 根目錄 `.YT_MEDIA_STATE.json`
+- Production workflow：`.github/workflows/publish.yml`
 
 ## 日常使用
 
 只做：
 
 ```text
-手機/相機影片 → Google Drive「建發用」底下任一日期資料夾
+影片 → Google Drive「建發用」底下日期資料夾
 ```
 
-Agent 會遞迴掃描：
+掃描規則：
 
 ```text
-01_優先上傳      → 優先處理
+01_優先上傳      → 優先
 一般日期資料夾    → 處理
 02_待剪輯        → 忽略
 03_重複待刪除    → 忽略
 04_已上傳        → 忽略
 ```
 
-日期資料夾沒有 `01_優先上傳` 時，直接放 MP4/MOV/MKV 也會處理。
+若知道人物，可以明確用資料夾或檔名：
 
-## 一次性 GitHub Actions / 管理 OAuth 設定
+```text
+08/13/卡洛琳/video_20260813_183252.mp4
+```
 
-已完成本機 OAuth 的 Windows PC 執行：
+只會使用設定中存在且文字明確出現的人名；**不做人臉辨識、不猜真人身份**。
+
+## 一次性 OAuth / GitHub Actions 設定
+
+Windows 執行：
 
 ```powershell
 cd C:\YT_MEDIA
@@ -66,147 +72,17 @@ git pull --ff-only origin main
 
 腳本會：
 
-1. 確認本機 Drive / YouTube OAuth 與 durable state。
-2. 建立獨立的 YouTube management OAuth，用於修改尚未公開影片 metadata 與讀取 Analytics。
-3. 若本機已有已登入的 `gcloud`，best-effort 啟用免費的 YouTube Analytics API；失敗時 publisher 不會停，會先用 YouTube Data API statistics fallback。
-4. 安全合併 state 到 Drive 根目錄 `.YT_MEDIA_STATE.json`。
-5. 將 OAuth JSON 直接寫入 GitHub Actions repository secrets；不 commit 到 repo。
-6. 觸發 `publish.yml` 驗收。
+1. 驗證 Drive + YouTube upload OAuth。
+2. 從 `client_secret.json` 取得 OAuth project ID；若本機有已登入的 `gcloud`，best-effort 啟用 `youtubeanalytics.googleapis.com`。失敗不會阻擋 publisher。
+3. 驗證 management token **實際儲存的 scopes** 必須同時包含：
+   - `https://www.googleapis.com/auth/youtube`
+   - `https://www.googleapis.com/auth/yt-analytics.readonly`
+4. 舊 token 缺 Analytics scope 時自動要求重新授權；選擇 Brand Account `象兒應援團`。
+5. 安全合併本機 state 到 Drive `.YT_MEDIA_STATE.json`。
+6. 將 OAuth JSON 直接寫入 GitHub repository secrets，不 commit 到 repo。
+7. 觸發 production workflow 做 end-to-end 驗收。
 
-成功後 PC 不需要保持開機。
-
-## GitHub Actions 正式執行
-
-`publish.yml` 每小時第 17 分執行一次，並用 `concurrency` 保證同一時間只有一個 publisher。
-
-```text
-Verify Drive + target YouTube channel
-        ↓
-Collect Analytics / update strategy
-        ↓
-Refresh unpublished metadata
-        ↓
-Scan Drive
-        ↓
-Media QC + duplicate fingerprint
-        ↓
-Select metadata arm + publish-time arm
-        ↓
-Upload / best-effort thumbnail
-        ↓
-Persist youtube_video_id immediately
-        ↓
-YouTube processing success
-        ↓
-Move source to 04_已上傳
-```
-
-## 自動學習策略
-
-這不是宣稱知道 YouTube 私有推薦公式，而是用**自己頻道的觀眾結果**做 channel-local optimization。
-
-每支影片在發布後會盡量取得：
-
-```text
-24h
-72h
-7d
-```
-
-評分主要使用：
-
-- averageViewPercentage / averageViewDuration
-- engagedViews / views
-- likes / comments / shares
-- subscribersGained
-
-如果 YouTube Analytics API 尚未啟用，會退化使用 Data API 的 views / likes / comments，等 Analytics API 可用後自動恢復完整訊號。
-
-### Metadata multi-armed bandit
-
-目前有 6 組 metadata strategy arm：
-
-```text
-direct
-stadium
-live
-quality
-moment
-energy
-```
-
-每支影片仍保留 deterministic 文案差異，但 arm 會控制搜尋詞、hook 與 hashtag family。系統會給歷史表現好的 arm 更多流量，同時保留 exploration，避免永遠卡在舊策略。
-
-### 發布時段實驗
-
-未來新影片會在以下時段中自動分配：
-
-```text
-17:30
-18:30
-19:30
-20:30
-21:30
-```
-
-已排程日期整天視為 occupied，所以不會因時段實驗而在同一天塞兩支。
-
-## Metadata 原則
-
-- 標題重要搜尋詞放前面。
-- 不在標題硬塞 `#Shorts`。
-- description hashtag 最多 3 個高相關詞。
-- `4K / 60fps / 直式` 只根據實際 ffprobe 結果寫入，不猜。
-- 人名只有在檔名或**立即父資料夾名稱**明確包含設定的人名時才加入；不做人臉辨識。
-
-例如：
-
-```text
-08/13/卡洛琳/video_20260813_183252.mp4
-```
-
-可以使用卡洛琳 metadata；單純：
-
-```text
-08/13/video_20260813_183252.mp4
-```
-
-仍使用通用啦啦隊 metadata。
-
-## Media QC
-
-每支新影片 upload 前執行：
-
-- ffprobe 可讀性 / duration / resolution 檢查
-- 5 點 average-hash fingerprint
-- duration + perceptual Hamming distance duplicate detection
-- 過暗 / 低對比 / 極低畫面變化 warning
-
-`probable_duplicate` 或不可讀影片會標成 `qc_rejected`，**不刪原始 Drive 檔**。
-
-## Thumbnail
-
-Agent 會從影片多個時間點挑 exposure / contrast 較健康的 frame，best-effort 呼叫 YouTube thumbnail API。若該頻道或 Shorts 類型不允許 API 設定 thumbnail，會記錄結果後繼續上傳，不會讓正式 publisher 失敗。
-
-## 防重複 / 當機恢復
-
-最重要的邊界：
-
-```text
-YouTube API 回傳 video_id
-        ↓
-先寫 .YT_MEDIA_STATE.json
-        ↓
-才做後續 processing / Drive move
-```
-
-因此 runner 在 upload 成功後即使中斷，下一輪只會 reconcile 該 YouTube video，不會重新上傳同一支 Drive 檔案。
-
-另外，新影片會保存 media fingerprint，避免內容重複但 Drive file ID 不同時被再次上傳。
-
-## Secrets
-
-GitHub Actions 使用：
+GitHub Secrets：
 
 ```text
 YT_MEDIA_CLIENT_SECRET_JSON
@@ -215,15 +91,253 @@ YT_MEDIA_YOUTUBE_TOKEN_JSON
 YT_MEDIA_YOUTUBE_MANAGE_TOKEN_JSON
 ```
 
-由 `SETUP_GITHUB_ACTIONS.cmd` 從 `%LOCALAPPDATA%\YT_MEDIA` 直接寫入 GitHub Secrets。不要把 OAuth JSON 貼到 Issue、PR、README 或 commit。
+不要把 OAuth JSON 放進 Issue、PR、README 或 commit。
+
+## Production workflow
+
+```text
+Verify Drive + target YouTube channel
+        ↓
+Collect exact snapshots + YouTube Analytics
+        ↓
+Update strategy
+        ↓
+Refresh unpublished metadata
+        ↓
+Scan Drive
+        ↓
+Media QC + duplicate detection + opening-second measurement
+        ↓
+Choose experiment arm
+        ↓
+Upload
+        ↓
+Persist youtube_video_id immediately
+        ↓
+Best-effort thumbnail（若該 phase/arm 選到）
+        ↓
+YouTube processing success
+        ↓
+Move source to 04_已上傳
+        ↓
+Generate Growth Dashboard artifact
+```
+
+Workflow 使用 `concurrency`，同一時間只允許一個 publisher，避免兩輪處理同一批影片。
+
+## 學習資料：兩種時間口徑嚴格分開
+
+### Exact cumulative snapshots
+
+YouTube Data API 在發布後跨過以下門檻時保存當下累積值：
+
+```text
+1h / 6h / 24h / 72h / 7d
+```
+
+主要保存 views / likes / comments，標記：
+
+```text
+time_basis = cumulative_at_capture
+training_eligible = false
+```
+
+這些資料適合看 early velocity，但**不拿來訓練 bandit**，避免把不完整數據當 retention/engagement 真相。
+
+### YouTube Analytics learning windows
+
+Analytics 使用獨立資料區：
+
+```text
+24h / 72h / 7d
+```
+
+它是 YouTube Analytics 的日期型查詢，state 明確標記：
+
+```text
+time_basis = calendar_date_query
+source = youtube_analytics
+training_eligible = true
+```
+
+只有 `source=youtube_analytics` 的成熟 snapshot 可以影響策略。
+
+收集訊號包括：
+
+- views / engagedViews
+- averageViewDuration / averageViewPercentage
+- likes / comments / shares
+- subscribersGained
+- `insightTrafficSourceType`，包含 Shorts vertical experience 的 `SHORTS` traffic
+- retention curve：`elapsedVideoTimeRatio` + `audienceWatchRatio` + `relativeRetentionPerformance`
+
+Retention 會摘要 1% / 10% / 25% / 50% / 75% / 100% checkpoint，方便判斷開頭掉人與完成度。
+
+## 評分不是 YouTube 私有公式
+
+這是 channel-local optimization score：
+
+```text
+Reach       20%
+Retention   45%
+Engagement  20%
+Conversion  15%
+```
+
+Dashboard 同時保留四個分數，不只給 Total Score，因此可以區分：
+
+- 平台沒有給足 reach
+- 有 reach 但 retention 差
+- 有觀看但互動弱
+- 有觀看但訂閱轉換弱
+
+## Contextual learner
+
+每支影片會保存 context：
+
+```text
+person / generic
+duration bucket
+4K / 其他畫質
+60 / 30 fps
+vertical / horizontal
+opening = active / static / dark / unknown
+weekday / weekend
+```
+
+策略比較不再把所有影片混成一鍋。與新片 context 越相似的歷史樣本，權重越高；這降低「剛好熱門人物分到某個標題，所以誤以為標題是原因」的 confounding。
+
+## 實驗分階段，不同時亂改所有變數
+
+目前 plan：
+
+```text
+Phase 1: metadata
+  24 個成熟 72h 樣本
+        ↓
+Phase 2: publish_time
+  24 個成熟 72h 樣本
+        ↓
+Phase 3: thumbnail
+  16 個成熟 72h 樣本
+        ↓
+Exploit / champion
+```
+
+Phase 1 只探索 metadata；發布時間與 thumbnail 使用目前 champion/default。進 Phase 2 後 metadata 固定 champion，只測發布時間；Phase 3 同理。
+
+Metadata arms：
+
+```text
+direct / stadium / live / quality / moment / energy
+```
+
+Publish-time arms：
+
+```text
+17:30 / 18:30 / 19:30 / 20:30 / 21:30
+```
+
+Thumbnail arms：
+
+```text
+best_frame / youtube_default
+```
+
+Bandit 保留 exploration，但同一 Drive file ID 的 assignment 可重現，不會因 retry 隨機換組。
+
+## Media QC / 內容特徵
+
+新影片 upload 前：
+
+- ffprobe 可讀性 / duration / resolution
+- 多時間點 perceptual fingerprint
+- duration + Hamming distance near-duplicate detection
+- 過暗 / 低對比 / 極低畫面變化 warning
+- opening-second brightness / motion measurement
+- `first_second_likely_dead_air` warning
+
+`probable_duplicate` 或不可讀影片標記 `qc_rejected`，**原始 Drive 檔不刪除**。
+
+目前 opening-second 只測量，不自動剪片；避免在沒有 retention 證據前做不可逆修改。
+
+## Thumbnail
+
+`best_frame` 會從多個時間點以曝光與對比挑 frame，再 best-effort 呼叫 YouTube thumbnail API。若 YouTube/Shorts 不允許 API 設 thumbnail，記錄結果後繼續 publisher。
+
+`youtube_default` 完全交給 YouTube。
+
+## Growth Dashboard
+
+每輪 workflow 最後產生：
+
+```text
+growth_dashboard.json
+growth_dashboard.md
+```
+
+並上傳成 GitHub Actions artifact：
+
+```text
+yt-media-growth-dashboard
+```
+
+保存 30 天。Dashboard 顯示：
+
+- active experiment + mature sample progress
+- 最近 7 天 snapshot totals
+- metadata / publish-time / thumbnail leaderboard
+- Top / Bottom videos
+- opening / duration / person / weekday 的平均 score correlations
+
+## Metadata 原則
+
+- 搜尋關鍵字靠前。
+- 不在標題硬塞 `#Shorts`。
+- description hashtag 最多 3 個高相關詞。
+- `4K / 60fps / 直式` 只根據 ffprobe 實際資料。
+- 人名只來自明確檔名/資料夾文字。
+
+## 防重複 / crash recovery
+
+不可破壞的邊界：
+
+```text
+YouTube API 回傳 video_id
+        ↓
+先寫 .YT_MEDIA_STATE.json
+        ↓
+才做 processing / Drive move
+```
+
+因此 runner 在 upload 成功後即使中斷，下一輪只 reconcile 已存在的 YouTube video，不重新 upload。
+
+另外保存 media fingerprint，防止同內容換了不同 Drive file ID 又被上傳。
+
+## Fail-open / Fail-closed
+
+可以 fail-open：
+
+- Analytics
+- metadata refresh
+- thumbnail
+- dashboard
+
+必須 fail-closed：
+
+- Drive OAuth / root identity
+- YouTube target channel identity
+- durable state
+- duplicate safety boundary
+- actual upload failure
+
+Analytics 掛掉不應讓影片停更；但也**絕不能拿 fallback 假裝完整 Analytics 繼續學**。
 
 ## 排程長期存活
 
-GitHub 對 public repo 若長期沒有 repository activity，可能自動停用 scheduled workflows。`keepalive.yml` 定期建立 `[skip ci]` 空 commit，避免 publisher 因 inactivity 被停掉。
+Public repo 長期無 activity 可能影響 scheduled workflows；`keepalive.yml` 定期建立 `[skip ci]` activity，避免 publisher 因 inactivity 停用。
 
 ## 本機工具
-
-本機保留作 OAuth/bootstrap/emergency console：
 
 ```powershell
 .\scripts\doctor.ps1
@@ -231,13 +345,4 @@ GitHub 對 public repo 若長期沒有 repository activity，可能自動停用 
 .\RUN_NOW.cmd
 ```
 
-Actions cutover 成功後，不再依賴 Windows Task Scheduler。
-
-## 不可破壞的安全條件
-
-- OAuth YouTube Channel ID 不等於 `UCzqapvxqSNMeNEM2ng91sow` 就拒絕執行。
-- 已持久化 `youtube_video_id` 就不重新上傳。
-- YouTube processing 成功後才移動 Drive 原片。
-- 不刪除原始影片。
-- `02_待剪輯`、`03_重複待刪除`、`04_已上傳` 永遠不掃描。
-- Analytics / thumbnail 失敗不得阻止正常 publisher；只有 Drive/YouTube identity、安全 state、實際 upload failure 才能阻擋正式流程。
+GitHub Actions 上線後不依賴 Windows Task Scheduler。
