@@ -154,6 +154,7 @@ def queue_report(config: dict[str, Any]) -> int:
             "thumbnail_arm": entry.get("thumbnail_arm"),
             "experiment_phase": entry.get("experiment_phase"),
             "context": entry.get("context"),
+            "content_features": entry.get("content_features"),
             "exact": entry.get("exact"),
             "analytics": entry.get("analytics"),
         })
@@ -247,6 +248,10 @@ def _staged_arm(
     return choose_arm(file_id, arms, stats, salt=salt, exploration=exploration)
 
 
+def _to_occupied_iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def run_once(config: dict[str, Any]) -> int:
     paths = _paths()
     paths["work"].mkdir(parents=True, exist_ok=True)
@@ -285,39 +290,23 @@ def run_once(config: dict[str, Any]) -> int:
     publish_arms = [str(x) for x in config.get("publish_time_arms", []) if str(x)]
     if not publish_arms:
         publish_arms = [str(config.get("publish_time", "18:30"))]
-    publish_stats = arm_statistics(state, "publish_time_arm", publish_arms)
-    default_publish = str(config.get("publish_time", "18:30"))
-    selected_publish_arms = [
-        _staged_arm(
-            file_id=item.file_id,
-            assignment_key="publish_time_arm",
-            arms=publish_arms,
-            stats=publish_stats,
-            phase=phase,
-            default=default_publish,
-            salt="publish-time",
-            exploration=exploration,
-        )
-        for item in pending
-    ]
+    publish_global_stats = arm_statistics(state, "publish_time_arm", publish_arms)
 
     thumbnail_arms = [str(x) for x in config.get("thumbnail_arms", ["best_frame", "youtube_default"]) if str(x)]
-    thumbnail_stats = arm_statistics(state, "thumbnail_arm", thumbnail_arms)
+    thumbnail_global_stats = arm_statistics(state, "thumbnail_arm", thumbnail_arms)
 
-    occupied = existing_publish_times(youtube)
-    slots = schedule_slots_for_times(config, selected_publish_arms, occupied)
+    occupied = list(existing_publish_times(youtube))
     print(f"已驗證頻道：{channel['title']} ({channel['id']})")
     print(f"State backend：{store.label}")
     print(f"本次準備處理 {len(pending)} 支影片。")
     print(json.dumps({
         "experiment": phase,
         "metadata_arm_stats": metadata_global_stats,
-        "publish_time_stats": publish_stats,
-        "thumbnail_arm_stats": thumbnail_stats,
-        "planned_publish_times": selected_publish_arms,
+        "publish_time_stats": publish_global_stats,
+        "thumbnail_arm_stats": thumbnail_global_stats,
     }, ensure_ascii=False, indent=2))
 
-    for item, slot, publish_time_arm in zip(pending, slots, selected_publish_arms):
+    for item in pending:
         entry = files_state.setdefault(item.file_id, {})
         work_dir = paths["work"] / item.file_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -328,13 +317,14 @@ def run_once(config: dict[str, Any]) -> int:
             download_file(drive, item.file_id, original, lambda p: print(f"下載 {item.name}: {p * 100:.1f}%", flush=True))
             upload_path = remux_primary_streams(original, cleaned, bool(config.get("remux_with_ffmpeg", True)))
             media_info = probe(upload_path)
-            qc: dict[str, Any] = {"warnings": [], "opening_second": {}}
+            qc: dict[str, Any] = {"warnings": [], "opening_second": {}, "content_features": {}}
 
             if bool(config.get("qc_enabled", True)):
                 qc = quality_report(upload_path, media_info, files_state, item.file_id, config)
                 entry["media_fingerprint"] = qc["fingerprint"]
                 entry["qc_warnings"] = qc["warnings"]
                 entry["opening_second"] = qc.get("opening_second", {})
+                entry["content_features"] = qc.get("content_features", {})
                 entry["qc_checked_at"] = datetime.now(timezone.utc).isoformat()
                 if not qc["ok"]:
                     entry["status"] = "qc_rejected"
@@ -362,6 +352,35 @@ def run_once(config: dict[str, Any]) -> int:
             metadata_item = _identity_aware_item(item, config)
             traits = media_traits(media_info)
             preliminary = make_metadata(metadata_item, media_info, config)
+            pre_publish_context = build_context(
+                person=preliminary.get("person"),
+                duration=float(traits.get("duration") or 0),
+                quality=str(traits.get("quality") or ""),
+                fps=float(traits.get("fps") or 0),
+                vertical=bool(traits.get("vertical")),
+                first_second=qc.get("opening_second"),
+                publish_at=None,
+                content_features=qc.get("content_features"),
+            )
+            publish_context_stats = contextual_arm_statistics(
+                state,
+                "publish_time_arm",
+                publish_arms,
+                pre_publish_context,
+            )
+            publish_time_arm = _staged_arm(
+                file_id=item.file_id,
+                assignment_key="publish_time_arm",
+                arms=publish_arms,
+                stats=publish_context_stats,
+                phase=phase,
+                default=str(config.get("publish_time", "18:30")),
+                salt="publish-time",
+                exploration=exploration,
+            )
+            slot = schedule_slots_for_times(config, [publish_time_arm], occupied)[0]
+            occupied.append(_to_occupied_iso(slot))
+
             context = build_context(
                 person=preliminary.get("person"),
                 duration=float(traits.get("duration") or 0),
@@ -370,6 +389,7 @@ def run_once(config: dict[str, Any]) -> int:
                 vertical=bool(traits.get("vertical")),
                 first_second=qc.get("opening_second"),
                 publish_at=slot,
+                content_features=qc.get("content_features"),
             )
             metadata_context_stats = contextual_arm_statistics(
                 state,
@@ -427,7 +447,6 @@ def run_once(config: dict[str, Any]) -> int:
             )
             video_id = response["id"]
 
-            thumbnail_result: dict[str, Any] | None = None
             if thumbnail_arm == "best_frame" and bool(config.get("thumbnail_best_effort", True)):
                 thumbnail_result = set_best_thumbnail(youtube, video_id, upload_path, media_info, work_dir)
             else:
@@ -453,6 +472,7 @@ def run_once(config: dict[str, Any]) -> int:
                 "thumbnail_arm": thumbnail_arm,
                 "experiment_phase": phase.get("name"),
                 "context": context,
+                "content_features": qc.get("content_features", {}),
                 "media_duration_seconds": round(float(traits.get("duration") or 0), 3),
                 "publish_at_local": slot.isoformat(),
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
