@@ -120,6 +120,38 @@ def choose_arm(
     return winner
 
 
+def metadata_config_for_arm(config: dict[str, Any], arm_id: str | None) -> dict[str, Any]:
+    """Return a shallow config variant that makes an experiment arm stable.
+
+    Each arm owns a search-term style, hook style, and rotating hashtag family;
+    other wording still varies deterministically by Drive file ID.
+    """
+    if not arm_id:
+        return config
+    arm = next(
+        (
+            item for item in config.get("metadata_arms", [])
+            if isinstance(item, dict) and str(item.get("id")) == str(arm_id)
+        ),
+        None,
+    )
+    if not arm:
+        return config
+
+    result = dict(config)
+    for key, index_key in (
+        ("named_search_title_terms", "search_index"),
+        ("generic_search_title_terms", "search_index"),
+        ("title_hooks", "hook_index"),
+        ("hashtag_rotation", "hashtag_index"),
+    ):
+        values = list(config.get(key, []))
+        if values:
+            index = int(arm.get(index_key, 0)) % len(values)
+            result[key] = [values[index]]
+    return result
+
+
 def schedule_slots_for_times(
     config: dict[str, Any],
     times: list[str],
