@@ -128,7 +128,13 @@ def collect(config: dict[str, Any]) -> int:
             if now < publish_at + window_age:
                 continue
             existing = analytics_state.get(window_name)
-            if isinstance(existing, dict) and existing.get("captured_at"):
+            # Full Analytics snapshots are immutable. Fallback snapshots are
+            # deliberately replaceable once YouTube Analytics becomes available.
+            if (
+                isinstance(existing, dict)
+                and existing.get("captured_at")
+                and existing.get("source") == "youtube_analytics"
+            ):
                 continue
 
             metrics: dict[str, float] = {}
@@ -157,10 +163,12 @@ def collect(config: dict[str, Any]) -> int:
 
             if not metrics:
                 continue
+            training_eligible = source == "youtube_analytics"
             snapshot = {
                 **metrics,
                 "score": performance_score(metrics),
                 "source": source,
+                "training_eligible": training_eligible,
                 "captured_at": now.isoformat(),
                 "window": window_name,
             }
@@ -172,6 +180,7 @@ def collect(config: dict[str, Any]) -> int:
                 "window": window_name,
                 "score": snapshot["score"],
                 "source": source,
+                "training_eligible": training_eligible,
             }, ensure_ascii=False))
 
     metadata_arms = [str(x.get("id")) for x in config.get("metadata_arms", []) if isinstance(x, dict) and x.get("id")]
