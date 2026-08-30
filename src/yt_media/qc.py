@@ -124,13 +124,47 @@ def find_duplicate(
     return None
 
 
-def best_thumbnail_frame(path: Path, media_info: dict[str, Any], target: Path) -> dict[str, Any] | None:
-    """Pick a visually healthy frame without trying to identify a person.
+def opening_second_report(path: Path, media_info: dict[str, Any]) -> dict[str, Any]:
+    """Measure the first second without mutating the video.
 
-    The score rewards contrast and mid-range exposure. It is intentionally
-    conservative: no face recognition, no generated text, and failure simply
-    leaves YouTube's normal thumbnail behavior untouched.
+    This detects likely dead-air openings (near-black or nearly static), but it
+    never trims footage automatically. The result is stored for later
+    correlation with retention analytics.
     """
+    duration = float(media_traits(media_info).get("duration") or 0)
+    if duration <= 0:
+        return {"available": False}
+    times = [0.05, min(0.35, duration - 0.02), min(0.90, duration - 0.02)]
+    frames: list[bytes] = []
+    hashes: list[str] = []
+    for at in times:
+        if at < 0:
+            continue
+        frame = _gray_frame(path, at)
+        if len(frame) >= 64:
+            frames.append(frame)
+            hashes.append(_average_hash(frame))
+    if not frames:
+        return {"available": False}
+
+    brightness = [sum(frame) / len(frame) for frame in frames]
+    contrast = [statistics.pstdev(frame) for frame in frames]
+    motion = [_hamming_hex(a, b) for a, b in zip(hashes, hashes[1:])]
+    mean_motion = sum(motion) / len(motion) if motion else 0.0
+    mean_brightness = sum(brightness) / len(brightness)
+    mean_contrast = sum(contrast) / len(contrast)
+    likely_dead_air = bool(mean_brightness < 10 or (mean_motion <= 1.0 and mean_contrast < 8.0))
+    return {
+        "available": True,
+        "mean_brightness": round(mean_brightness, 2),
+        "mean_contrast": round(mean_contrast, 2),
+        "mean_motion_hamming": round(mean_motion, 3),
+        "likely_dead_air": likely_dead_air,
+    }
+
+
+def best_thumbnail_frame(path: Path, media_info: dict[str, Any], target: Path) -> dict[str, Any] | None:
+    """Pick a visually healthy frame without trying to identify a person."""
     exe = shutil.which("ffmpeg")
     if not exe:
         return None
@@ -231,12 +265,17 @@ def quality_report(
     if contrast is not None and float(contrast) < float(config.get("qc_low_contrast_warning", 4.0)):
         warnings.append("very_low_contrast")
 
+    opening = opening_second_report(path, media_info)
+    if opening.get("likely_dead_air"):
+        warnings.append("first_second_likely_dead_air")
+
     return {
         "ok": not blockers,
         "blockers": blockers,
         "warnings": warnings,
         "traits": traits,
         "fingerprint": fingerprint,
+        "opening_second": opening,
         "duplicate": duplicate,
         "file": str(path.name),
     }
