@@ -57,6 +57,33 @@ function Invoke-Checked([string]$Exe, [string[]]$Arguments, [string]$Label) {
     if ($code -ne 0) { throw "$Label failed with exit code $code" }
 }
 
+function Ensure-LocalOAuth([string]$Python) {
+    Write-Host "Verifying local Google Drive + YouTube OAuth..." -ForegroundColor Cyan
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Python -m yt_media.agent doctor | Out-Host
+        $doctorCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $old
+    }
+
+    if ($doctorCode -eq 0) {
+        Write-Host "Local Google OAuth is valid." -ForegroundColor Green
+        return
+    }
+
+    Write-Warning "Local OAuth token is missing, expired, revoked, or cannot refresh. Re-authorizing before cutover."
+    Write-Host "Two Google authorization browser steps may open: Drive first, then YouTube." -ForegroundColor Yellow
+    Invoke-Checked $Python @("-m","yt_media.agent","authorize") "Google OAuth re-authorization"
+    Invoke-Checked $Python @("-m","yt_media.agent","doctor") "Verify refreshed Google OAuth"
+
+    foreach ($token in @($DriveToken, $YouTubeToken)) {
+        if (-not (Test-Path $token)) { throw "OAuth completed but token file is missing: $token" }
+    }
+    Write-Host "Local Google OAuth repaired and verified." -ForegroundColor Green
+}
+
 function Set-GhSecretFromFile([string]$Gh, [string]$Name, [string]$Path) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Gh
@@ -120,7 +147,10 @@ function Wait-LocalAgentIdle {
 Write-Host "=== YT_MEDIA -> GitHub Actions cutover ===" -ForegroundColor Cyan
 Write-Host "No Google Cloud Billing is required."
 
-foreach ($required in @($ClientSecret, $DriveToken, $YouTubeToken, $LocalState)) {
+# client_secret + state are the only files that must pre-exist. OAuth token
+# files are deliberately repairable here because old refresh tokens can expire
+# or be revoked between the Windows installation and this cutover.
+foreach ($required in @($ClientSecret, $LocalState)) {
     if (-not (Test-Path $required)) {
         throw "Missing required migration file: $required"
     }
@@ -128,6 +158,10 @@ foreach ($required in @($ClientSecret, $DriveToken, $YouTubeToken, $LocalState))
 
 $Python = Join-Path $Repo ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) { throw "Missing Python environment: $Python. Run INSTALL.cmd first." }
+
+# Repair OAuth before freezing the Windows publisher. This prevents a stale
+# token from leaving the system in a half-cutover state.
+Ensure-LocalOAuth $Python
 
 $Gh = Ensure-Gh
 if (-not (Test-CommandOk $Gh @("auth","status"))) {
