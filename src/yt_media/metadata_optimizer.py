@@ -15,6 +15,7 @@ from googleapiclient.discovery import build
 
 from .core import VideoItem, load_config, make_metadata, runtime_dir
 from .google_api import build_drive, read_drive_state, write_drive_state
+from .strategy import arm_statistics, choose_arm, metadata_config_for_arm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANAGE_SCOPES = ["https://www.googleapis.com/auth/youtube"]
@@ -186,11 +187,19 @@ def refresh(config: dict[str, Any]) -> int:
     root_id = str(config["drive_root_folder_id"])
     state, state_file_id = read_drive_state(drive, root_id)
     files_state = state.setdefault("files", {})
-    target_version = int(config.get("metadata_version", 2))
+    target_version = int(config.get("metadata_version", 3))
     limit = int(config.get("metadata_refresh_max_per_run", 12))
     refreshed = 0
     marked_current = 0
     now = datetime.now(timezone.utc)
+    arm_ids = [
+        str(item["id"])
+        for item in config.get("metadata_arms", [])
+        if isinstance(item, dict) and item.get("id")
+    ] or ["default"]
+    arm_stats = arm_statistics(state, "metadata_arm", arm_ids)
+    exploration = float(config.get("strategy_exploration", 0.35))
+    publish_arms = set(str(x) for x in config.get("publish_time_arms", []))
 
     for file_id, entry in files_state.items():
         if refreshed + marked_current >= limit:
@@ -217,8 +226,26 @@ def refresh(config: dict[str, Any]) -> int:
         if publish_dt <= now:
             continue
 
+        if not entry.get("metadata_arm"):
+            entry["metadata_arm"] = choose_arm(
+                file_id,
+                arm_ids,
+                arm_stats,
+                salt="metadata",
+                exploration=exploration,
+            )
+        if not entry.get("publish_time_arm") and entry.get("publish_at_local"):
+            try:
+                local_dt = datetime.fromisoformat(str(entry["publish_at_local"]).replace("Z", "+00:00"))
+                candidate = local_dt.strftime("%H:%M")
+                if candidate in publish_arms:
+                    entry["publish_time_arm"] = candidate
+            except ValueError:
+                pass
+
         item = _video_item_from_drive(drive, file_id)
-        metadata = make_metadata(item, _media_hint(video), config)
+        arm_config = metadata_config_for_arm(config, str(entry.get("metadata_arm") or ""))
+        metadata = make_metadata(item, _media_hint(video), arm_config)
         snippet = video.get("snippet", {})
         current_tags = list(snippet.get("tags", []))
         if (
@@ -239,6 +266,7 @@ def refresh(config: dict[str, Any]) -> int:
                 "event": "metadata_refreshed",
                 "file": item.name,
                 "youtube_video_id": video_id,
+                "metadata_arm": entry.get("metadata_arm"),
                 "title": metadata["title"],
                 "hashtags": metadata["hashtags"],
             }, ensure_ascii=False))
@@ -250,6 +278,7 @@ def refresh(config: dict[str, Any]) -> int:
         "metadata_version": target_version,
         "refreshed": refreshed,
         "already_current": marked_current,
+        "arm_stats": arm_stats,
     }, ensure_ascii=False, indent=2))
     return 0
 
