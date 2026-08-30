@@ -89,5 +89,7 @@
   "qc_low_contrast_warning": 4.0,
   "qc_static_hamming_warning": 1.5,
   "duplicate_duration_tolerance_seconds": 1.5,
-  "duplicate_hamming_threshold": 2.0
+  "duplicate_hamming_threshold": 2.0,
+
+  "thumbnail_best_effort": true
 }
