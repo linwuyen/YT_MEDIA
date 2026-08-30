@@ -15,16 +15,55 @@
   "default_language": "zh-TW",
   "remux_with_ffmpeg": true,
   "stop_on_first_error": true,
+  "metadata_version": 2,
+  "metadata_refresh_max_per_run": 12,
+  "max_description_hashtags": 3,
   "known_people": ["李珠垠", "朴星垠", "卡洛琳", "安娜", "李雅英"],
-  "named_title_templates": [
-    "{person}應援魅力全開🔥｜球場啦啦隊直拍 4K",
-    "{person}一登場全場目光被吸走🔥｜球場應援直拍 4K",
-    "{person}這段應援太有感染力了🔥｜啦啦隊直拍 4K"
+  "named_search_title_terms": [
+    "{person} 啦啦隊應援直拍",
+    "{person} 球場應援直拍",
+    "{person} 啦啦隊現場直拍",
+    "{person} 球場啦啦隊直拍",
+    "{person} 應援現場直拍",
+    "{person} 啦啦隊應援現場"
   ],
-  "generic_title_templates": [
-    "球場應援魅力全開🔥｜啦啦隊直拍 4K",
-    "全場氣氛瞬間拉滿🔥｜球場啦啦隊直拍 4K",
-    "這段應援太有感染力了🔥｜球場直拍 4K"
+  "generic_search_title_terms": [
+    "啦啦隊應援直拍",
+    "球場啦啦隊直拍",
+    "球場應援現場",
+    "啦啦隊現場應援",
+    "球場應援直拍",
+    "啦啦隊現場直拍",
+    "應援現場直拍",
+    "球場啦啦隊應援"
   ],
-  "hashtags": ["啦啦隊", "球場應援", "應援女孩", "直拍", "4K", "Shorts"]
+  "title_hooks": [
+    "現場氣氛實錄",
+    "應援精彩片段",
+    "球場現場紀錄",
+    "直式高畫質紀錄",
+    "應援現場實錄",
+    "現場聲音完整保留",
+    "球場氣氛直擊",
+    "現場應援片段",
+    "應援動作高畫質紀錄",
+    "球場應援瞬間",
+    "現場直拍片段",
+    "應援氣氛紀錄"
+  ],
+  "title_accents": ["", "", "", "🔥", "✨"],
+  "description_second_lines": [
+    "保留現場聲音與應援氣氛，更多球場直拍持續更新。",
+    "高畫質記錄球場應援現場，喜歡這類直拍可以訂閱追蹤。",
+    "現場原音與應援氣氛完整保留，更多片段會持續上線。",
+    "以直拍方式保留球場現場感，後續還有更多應援片段。"
+  ],
+  "hashtag_rotation": [
+    "球場應援",
+    "應援直拍",
+    "啦啦隊女孩",
+    "Cheerleader",
+    "現場直拍",
+    "4K直拍"
+  ]
 }
