@@ -6,52 +6,12 @@ from datetime import datetime, timedelta
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from .learning import learning_snapshot, score_dimensions
+
 
 def performance_score(metrics: dict[str, Any]) -> float:
-    """Return a 0..100 local optimization score from audience outcomes.
-
-    This is deliberately a channel-local ranking score, not a claim about
-    YouTube's recommendation formula. Retention and engaged viewing dominate;
-    shares/comments/subscriber conversion provide smaller quality signals.
-    """
-    views = max(0.0, float(metrics.get("views") or 0))
-    engaged = max(0.0, float(metrics.get("engagedViews") or views))
-    avg_pct = max(0.0, float(metrics.get("averageViewPercentage") or 0))
-    likes = max(0.0, float(metrics.get("likes") or 0))
-    comments = max(0.0, float(metrics.get("comments") or 0))
-    shares = max(0.0, float(metrics.get("shares") or 0))
-    subs = max(0.0, float(metrics.get("subscribersGained") or 0))
-
-    retention = min(avg_pct / 100.0, 1.25) / 1.25
-    velocity = min(math.log1p(engaged) / math.log1p(10000.0), 1.0)
-    interaction_rate = (likes + 2.0 * comments + 3.0 * shares) / max(engaged, 1.0)
-    interaction = min(interaction_rate / 0.08, 1.0)
-    subscriber = min((subs / max(engaged, 1.0)) / 0.01, 1.0)
-    engaged_ratio = min(engaged / max(views, 1.0), 1.0)
-
-    score = 100.0 * (
-        0.40 * retention
-        + 0.20 * velocity
-        + 0.15 * interaction
-        + 0.15 * subscriber
-        + 0.10 * engaged_ratio
-    )
-    return round(max(0.0, min(score, 100.0)), 3)
-
-
-def _window_snapshot(entry: dict[str, Any], preferred: Iterable[str] = ("7d", "72h", "24h")) -> dict[str, Any] | None:
-    analytics = entry.get("analytics", {})
-    if not isinstance(analytics, dict):
-        return None
-    for name in preferred:
-        snapshot = analytics.get(name)
-        if (
-            isinstance(snapshot, dict)
-            and snapshot.get("score") is not None
-            and snapshot.get("training_eligible", True) is not False
-        ):
-            return snapshot
-    return None
+    """Compatibility wrapper for the channel-local total score."""
+    return score_dimensions(metrics)["total"]
 
 
 def arm_statistics(
@@ -71,15 +31,17 @@ def arm_statistics(
         arm = str(entry.get(assignment_key) or "")
         if arm not in result:
             continue
-        snapshot = _window_snapshot(entry)
+        snapshot = learning_snapshot(entry)
         if not snapshot:
             continue
+        scores = snapshot.get("scores") if isinstance(snapshot.get("scores"), dict) else {}
+        score = scores.get("total", snapshot.get("score"))
         try:
-            score = float(snapshot["score"])
-        except (TypeError, ValueError, KeyError):
+            value = float(score)
+        except (TypeError, ValueError):
             continue
         result[arm]["count"] += 1.0
-        sums[arm] += score
+        sums[arm] += value
 
     for arm, row in result.items():
         if row["count"]:
@@ -97,21 +59,24 @@ def choose_arm(
 ) -> str:
     """Deterministic weighted exploration using an exponential race.
 
-    Better observed arms get more traffic, while under-sampled arms retain an
-    exploration bonus. The Drive file ID makes retries stable.
+    Contextual means and effective counts are used when present. Drive file ID
+    keeps retries stable.
     """
     arm_list = [str(x) for x in arms if str(x)]
     if not arm_list:
         raise ValueError("At least one strategy arm is required")
     stats = stats or {}
-    total = sum(float(stats.get(arm, {}).get("count", 0.0)) for arm in arm_list)
+    total = sum(
+        float(stats.get(arm, {}).get("effective_count", stats.get(arm, {}).get("count", 0.0)))
+        for arm in arm_list
+    )
 
     winner = arm_list[0]
     winner_key = float("inf")
     for arm in arm_list:
         row = stats.get(arm, {})
-        count = float(row.get("count", 0.0))
-        mean = float(row.get("mean", 50.0)) / 100.0
+        count = float(row.get("effective_count", row.get("count", 0.0)))
+        mean = float(row.get("contextual_mean", row.get("mean", 50.0))) / 100.0
         bonus = exploration * math.sqrt(math.log(total + 2.0) / (count + 1.0))
         weight = max(0.05, mean + bonus)
         digest = hashlib.sha256(f"{salt}:{file_id}:{arm}".encode("utf-8")).digest()
@@ -125,7 +90,6 @@ def choose_arm(
 
 
 def metadata_config_for_arm(config: dict[str, Any], arm_id: str | None) -> dict[str, Any]:
-    """Return a shallow config variant that makes an experiment arm stable."""
     if not arm_id:
         return config
     arm = next(
