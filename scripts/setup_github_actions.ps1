@@ -35,6 +35,21 @@ function Ensure-Gh {
     return $gh
 }
 
+function Find-Gcloud {
+    $cmd = Get-Command gcloud.cmd -ErrorAction SilentlyContinue
+    if (-not $cmd) { $cmd = Get-Command gcloud.exe -ErrorAction SilentlyContinue }
+    if (-not $cmd) { $cmd = Get-Command gcloud -ErrorAction SilentlyContinue }
+    if ($cmd) { return $cmd.Source }
+    $candidates = @(
+        "$env:LOCALAPPDATA\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
+        "$env:ProgramFiles\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    return $null
+}
+
 function Test-CommandOk([string]$Exe, [string[]]$Arguments) {
     $old = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -58,8 +73,48 @@ function Invoke-Checked([string]$Exe, [string[]]$Arguments, [string]$Label) {
     if ($code -ne 0) { throw "$Label failed with exit code $code" }
 }
 
+function Enable-YouTubeAnalyticsApiBestEffort {
+    Write-Host "Checking YouTube Analytics API..." -ForegroundColor Cyan
+    try {
+        $client = Get-Content -Raw -Encoding UTF8 $ClientSecret | ConvertFrom-Json
+        $projectId = $null
+        if ($client.installed -and $client.installed.project_id) { $projectId = [string]$client.installed.project_id }
+        if (-not $projectId -and $client.web -and $client.web.project_id) { $projectId = [string]$client.web.project_id }
+        if (-not $projectId) {
+            Write-Warning "Could not read OAuth project_id from client_secret.json; skipping API enable check."
+            return
+        }
+
+        $gcloud = Find-Gcloud
+        if (-not $gcloud) {
+            Write-Warning "gcloud is not installed. Analytics OAuth will still be configured; if the API is disabled, publishing continues and Analytics learning stays paused."
+            return
+        }
+        if (-not (Test-CommandOk $gcloud @("auth","list","--filter=status:ACTIVE","--format=value(account)"))) {
+            Write-Warning "gcloud has no usable active login. Skipping YouTube Analytics API enable; this does not block publishing."
+            return
+        }
+
+        $old = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $gcloud services enable youtubeanalytics.googleapis.com --project $projectId --quiet *> $null
+            $code = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $old
+        }
+        if ($code -eq 0) {
+            Write-Host "YouTube Analytics API is enabled for OAuth project $projectId." -ForegroundColor Green
+        } else {
+            Write-Warning "Could not enable YouTube Analytics API automatically for $projectId. Uploading will continue; Analytics learning remains fail-open until the API is enabled."
+        }
+    } catch {
+        Write-Warning "YouTube Analytics API bootstrap check failed: $($_.Exception.Message). Publishing is not blocked."
+    }
+}
+
 function Ensure-LocalOAuth([string]$Python) {
-    Write-Host "Verifying local Google Drive + YouTube OAuth..." -ForegroundColor Cyan
+    Write-Host "Verifying local Google Drive + YouTube upload OAuth..." -ForegroundColor Cyan
     $old = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
@@ -70,12 +125,12 @@ function Ensure-LocalOAuth([string]$Python) {
     }
 
     if ($doctorCode -eq 0) {
-        Write-Host "Local Google OAuth is valid." -ForegroundColor Green
+        Write-Host "Local Drive + YouTube upload OAuth is valid." -ForegroundColor Green
         return
     }
 
-    Write-Warning "Local OAuth token is missing, expired, revoked, or cannot refresh. Re-authorizing before cutover."
-    Write-Host "Two Google authorization browser steps may open: Drive first, then YouTube." -ForegroundColor Yellow
+    Write-Warning "Local OAuth token is missing, expired, revoked, or cannot refresh. Re-authorizing before setup."
+    Write-Host "Two Google authorization browser steps may open: Drive first, then YouTube upload." -ForegroundColor Yellow
     Invoke-Checked $Python @("-m","yt_media.agent","authorize") "Google OAuth re-authorization"
     Invoke-Checked $Python @("-m","yt_media.agent","doctor") "Verify refreshed Google OAuth"
 
@@ -86,7 +141,7 @@ function Ensure-LocalOAuth([string]$Python) {
 }
 
 function Ensure-MetadataOAuth([string]$Python) {
-    Write-Host "Verifying YouTube metadata editor OAuth..." -ForegroundColor Cyan
+    Write-Host "Verifying YouTube metadata + Analytics OAuth..." -ForegroundColor Cyan
     if (Test-Path $YouTubeManageToken) {
         $old = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
@@ -97,14 +152,15 @@ function Ensure-MetadataOAuth([string]$Python) {
             $ErrorActionPreference = $old
         }
         if ($code -eq 0) {
-            Write-Host "YouTube metadata editor OAuth is valid." -ForegroundColor Green
+            Write-Host "YouTube metadata + Analytics OAuth has the required scopes." -ForegroundColor Green
             return
         }
     }
 
-    Write-Host "One additional YouTube authorization is required to edit titles/descriptions of already-uploaded scheduled videos." -ForegroundColor Yellow
-    Invoke-Checked $Python @("-m","yt_media.metadata_optimizer","authorize") "YouTube metadata editor authorization"
-    Invoke-Checked $Python @("-m","yt_media.metadata_optimizer","doctor") "Verify YouTube metadata editor OAuth"
+    Write-Host "One YouTube authorization is required for scheduled-video metadata edits and read-only Analytics." -ForegroundColor Yellow
+    Write-Host "Select the Brand Account channel '象兒應援團' when Google asks which channel to authorize." -ForegroundColor Yellow
+    Invoke-Checked $Python @("-m","yt_media.metadata_optimizer","authorize") "YouTube metadata + Analytics authorization"
+    Invoke-Checked $Python @("-m","yt_media.metadata_optimizer","doctor") "Verify YouTube metadata + Analytics OAuth"
 }
 
 function Read-Utf8JsonWithoutBom([string]$Path) {
@@ -176,8 +232,8 @@ function Wait-LocalAgentIdle {
     throw "Timed out waiting for the Windows uploader to stop."
 }
 
-Write-Host "=== YT_MEDIA -> GitHub Actions setup ===" -ForegroundColor Cyan
-Write-Host "No Google Cloud Billing is required."
+Write-Host "=== YT_MEDIA GitHub Actions growth-system setup ===" -ForegroundColor Cyan
+Write-Host "No Google Cloud Billing is required for the production runtime."
 
 foreach ($required in @($ClientSecret, $LocalState)) {
     if (-not (Test-Path $required)) {
@@ -189,6 +245,7 @@ $Python = Join-Path $Repo ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) { throw "Missing Python environment: $Python. Run INSTALL.cmd first." }
 
 Ensure-LocalOAuth $Python
+Enable-YouTubeAnalyticsApiBestEffort
 Ensure-MetadataOAuth $Python
 
 $Gh = Ensure-Gh
@@ -219,7 +276,7 @@ try {
     Set-GhSecretFromFile $Gh "YT_MEDIA_YOUTUBE_TOKEN_JSON" $YouTubeToken
     Set-GhSecretFromFile $Gh "YT_MEDIA_YOUTUBE_MANAGE_TOKEN_JSON" $YouTubeManageToken
 
-    Write-Host "Starting a GitHub Actions verification run..." -ForegroundColor Cyan
+    Write-Host "Starting a GitHub Actions end-to-end verification run..." -ForegroundColor Cyan
     Invoke-Checked $Gh @("workflow","run",$Workflow,"--repo",$GithubRepo,"--ref","main") "Start GitHub Actions workflow"
     Start-Sleep -Seconds 5
 
@@ -237,11 +294,12 @@ try {
     }
 
     Write-Host ""
-    Write-Host "GitHub Actions setup complete." -ForegroundColor Green
+    Write-Host "GitHub Actions growth-system setup complete." -ForegroundColor Green
     Write-Host "Runtime: GitHub-hosted ubuntu-latest"
     Write-Host "Schedule: hourly at minute 17"
     Write-Host "State: Google Drive root/.YT_MEDIA_STATE.json"
-    Write-Host "Metadata: diversified title/description/hashtags + refresh for unpublished scheduled videos"
+    Write-Host "Learning: staged metadata -> publish-time -> thumbnail experiments"
+    Write-Host "Dashboard: Actions artifact yt-media-growth-dashboard"
     Write-Host "Your PC does not need to stay on."
 } catch {
     if ($WasEnabled -and (Get-ScheduledTask -TaskName $WindowsTaskName -ErrorAction SilentlyContinue)) {
