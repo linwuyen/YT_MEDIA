@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import math
 import shutil
 import statistics
 import subprocess
@@ -124,6 +122,69 @@ def find_duplicate(
                 "distance": round(distance, 3),
             }
     return None
+
+
+def best_thumbnail_frame(path: Path, media_info: dict[str, Any], target: Path) -> dict[str, Any] | None:
+    """Pick a visually healthy frame without trying to identify a person.
+
+    The score rewards contrast and mid-range exposure. It is intentionally
+    conservative: no face recognition, no generated text, and failure simply
+    leaves YouTube's normal thumbnail behavior untouched.
+    """
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        return None
+    traits = media_traits(media_info)
+    duration = float(traits.get("duration") or 0)
+    if duration <= 0:
+        return None
+
+    fractions = [0.03, 0.12, 0.28, 0.45, 0.62, 0.78, 0.92]
+    candidates: list[tuple[float, float, float, float]] = []
+    for fraction in fractions:
+        at = max(0.0, min(duration - 0.05, duration * fraction))
+        frame = _gray_frame(path, at)
+        if len(frame) < 64:
+            continue
+        brightness = sum(frame) / len(frame)
+        contrast = statistics.pstdev(frame)
+        exposure_penalty = abs(brightness - 118.0) * 0.08
+        score = contrast - exposure_penalty
+        if brightness < 10 or brightness > 245:
+            score -= 25
+        candidates.append((score, at, brightness, contrast))
+    if not candidates:
+        return None
+
+    score, at, brightness, contrast = max(candidates, key=lambda item: item[0])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            [
+                exe,
+                "-y",
+                "-v", "error",
+                "-ss", f"{at:.3f}",
+                "-i", str(path),
+                "-frames:v", "1",
+                "-vf", "scale=720:-2",
+                "-q:v", "3",
+                str(target),
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        target.unlink(missing_ok=True)
+        return None
+    if not target.exists() or target.stat().st_size <= 0:
+        return None
+    return {
+        "path": str(target),
+        "at_seconds": round(at, 3),
+        "visual_score": round(score, 3),
+        "brightness": round(brightness, 2),
+        "contrast": round(contrast, 2),
+    }
 
 
 def quality_report(
