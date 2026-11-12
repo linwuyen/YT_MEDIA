@@ -1,9 +1,6 @@
 name: Publish Drive videos
 
 on:
-  schedule:
-    # Offset from the top of the hour to reduce GitHub schedule congestion.
-    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
